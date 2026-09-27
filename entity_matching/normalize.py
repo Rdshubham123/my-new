@@ -86,7 +86,7 @@ _SKEL_SUBS = [
 _VOWELS = set("aeiouyh")
 
 
-@lru_cache(maxsize=500_000)
+@lru_cache(maxsize=100_000)
 def skeleton(token: str) -> str:
     if not token:
         return ""
@@ -181,7 +181,7 @@ def _clean_single_name(s: str, from_indic: bool):
     return core, legal, flags
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=20_000)
 def normalize_name(raw) -> dict:
     s = clean_unicode(raw)
     has_indic = bool(INDIC_RE.search(s))
@@ -257,7 +257,7 @@ def canon_number(tok: str) -> str:
     return _DIGITS.sub(lambda mm: mm.group(0).lstrip("0") or "0", tok).strip("-/")
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=20_000)
 def normalize_address(raw, country: str = "") -> dict:
     s = clean_unicode(raw)
     for native, code in _NATIVE_STATES_SORTED:

@@ -5,9 +5,12 @@ import gc
 import os
 import sys
 import time
+from array import array
 from multiprocessing import get_context
 from multiprocessing.context import TimeoutError as MPTimeout
 from pathlib import Path
+
+import numpy as np
 
 _T0 = time.time()
 
@@ -110,7 +113,9 @@ def run_pool(fn, tasks, n_jobs: int, ordered: bool = True, timeout: float = 3600
     results = [None] * len(tasks)
     done = [False] * len(tasks)
     ctx = get_context("fork")
-    pool = ctx.Pool(min(n_jobs, len(tasks)), initializer=_init_worker)
+    # maxtasksperchild recycles workers: any memory a worker accumulated
+    # (copy-on-write pages, caches) is returned to the OS regularly
+    pool = ctx.Pool(min(n_jobs, len(tasks)), initializer=_init_worker, maxtasksperchild=25)
     try:
         asyncs = [pool.apply_async(fn, (t,)) for t in tasks]
         for i, ar in enumerate(asyncs):
@@ -132,3 +137,76 @@ def run_pool(fn, tasks, n_jobs: int, ordered: bool = True, timeout: float = 3600
         if not ok:
             results[i] = fn(tasks[i])
     return results
+
+
+# ---------------------------------------------------------------------------
+# Copy-on-write-safe strings for forked workers
+# ---------------------------------------------------------------------------
+# A forked worker that merely READS a Python str still writes its refcount,
+# so the kernel copies every memory page it touches: with millions of
+# normalised strings and 4 workers the parent's text is duplicated up to 4x
+# (the classic "copy-on-read" OOM).  Workers therefore read strings from ONE
+# bytes buffer + offsets (only that object's header page is ever written).
+class StrCol:
+    __slots__ = ("buf", "off")
+
+    def __init__(self, values):
+        enc = [("" if v is None else str(v)).encode("utf-8", "surrogatepass") for v in values]
+        off = np.zeros(len(enc) + 1, np.int64)
+        if enc:
+            np.cumsum(np.fromiter((len(e) for e in enc), np.int64, len(enc)), out=off[1:])
+        self.buf = b"".join(enc)
+        self.off = array("q", off.tobytes())
+
+    def __len__(self):
+        return len(self.off) - 1
+
+    def __getitem__(self, i):
+        return self.buf[self.off[i]:self.off[i + 1]].decode("utf-8", "surrogatepass")
+
+
+class CodedCol:
+    """Row access to a categorical column: codes (numpy) -> StrCol of categories."""
+    __slots__ = ("codes", "cats")
+
+    def __init__(self, codes, cats):
+        self.codes, self.cats = codes, cats
+
+    def __len__(self):
+        return len(self.codes)
+
+    def __getitem__(self, i):
+        c = self.codes[i]
+        return self.cats[c] if c >= 0 else ""
+
+
+_STRCOL_CACHE: dict = {}
+
+
+def _strcol_for(categories):
+    key = id(categories)
+    hit = _STRCOL_CACHE.get(key)
+    if hit is None or hit[0] is not categories:
+        hit = (categories, StrCol(categories))
+        _STRCOL_CACHE[key] = hit
+    return hit[1]
+
+
+def clear_strcol_cache():
+    _STRCOL_CACHE.clear()
+
+
+def worker_view(df, cols):
+    """dict col -> COW-safe row accessor (CodedCol for text, numpy otherwise)."""
+    import pandas as pd
+    out = {}
+    for c in cols:
+        s = df[c]
+        if isinstance(s.dtype, pd.CategoricalDtype):
+            out[c] = CodedCol(s.cat.codes.to_numpy(), _strcol_for(s.cat.categories))
+        elif s.dtype == object:
+            cat = s.astype("category")
+            out[c] = CodedCol(cat.cat.codes.to_numpy(), StrCol(cat.cat.categories))
+        else:
+            out[c] = s.to_numpy()
+    return out

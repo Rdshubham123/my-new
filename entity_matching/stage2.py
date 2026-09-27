@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from rapidfuzz import fuzz
 
-from .utils import run_pool
+from .utils import run_pool, worker_view
 
 CARRY = ["n_tset_skel", "n_idf_contain", "n_alt_best", "n_exact_skel", "a_tset",
          "num_shared", "num_jacc", "a_missing_t", "n_core_df_t", "blk_score",
@@ -100,9 +100,9 @@ def build_stage2(s_row, t_row, p1, carry: dict, tgt: pd.DataFrame, n_jobs: int =
     pairs = cand.merge(top, on="s", suffixes=("", "_sib"))
     pairs = pairs[pairs["t"] != pairs["t_sib"]]
     if len(pairs):
+        v = worker_view(tgt, ["n_skel", "a_atext", "a_nums"])
         _G.update(ta=pairs["t"].to_numpy(), tb=pairs["t_sib"].to_numpy(),
-                  skel=tgt["n_skel"].to_numpy(), atext=tgt["a_atext"].to_numpy(),
-                  nums=tgt["a_nums"].to_numpy())
+                  skel=v["n_skel"], atext=v["a_atext"], nums=v["a_nums"])
         m = len(pairs)
         sims = np.empty((m, 3), np.float32)
         for lo, arr in run_pool(_sib_worker, [(lo, min(lo + 50000, m)) for lo in range(0, m, 50000)], n_jobs):

@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from .normalize import normalize_address, normalize_name
-from .utils import free, log as _log, n_workers, run_pool
+from .utils import StrCol, free, log as _log, n_workers, run_pool
 
 USECOLS = ["entity_id", "business_name", "business_address", "country"]
 _G: dict = {}
@@ -63,13 +63,13 @@ def gt_pairs(gt: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 def _name_worker(b):
     vals = _G["vals"]
-    return [tuple(normalize_name(v)[k] for k in NAME_FIELDS) for v in vals[b[0]:b[1]]]
+    return [tuple(normalize_name(vals[i])[k] for k in NAME_FIELDS) for i in range(b[0], b[1])]
 
 
 def _addr_worker(b):
     vals, ctry = _G["vals"], _G["ctry"]
-    return [tuple(normalize_address(v, c)[k] for k in ADDR_FIELDS)
-            for v, c in zip(vals[b[0]:b[1]], ctry[b[0]:b[1]])]
+    return [tuple(normalize_address(vals[i], ctry[i])[k] for k in ADDR_FIELDS)
+            for i in range(b[0], b[1])]
 
 
 def _run(fn, n, n_jobs, chunk=20000):
@@ -80,9 +80,16 @@ def _run(fn, n, n_jobs, chunk=20000):
 
 
 def _assign(df, prefix, fields, int_fields, res, codes):
+    """Store each normalised field as a pandas Categorical (int32 codes + the
+    unique strings once): compact, and COW-safe for workers via worker_view."""
     for j, k in enumerate(fields):
-        col = np.array([r[j] for r in res], dtype=object)[codes]
-        df[prefix + k] = col.astype(np.int8) if k in int_fields else col
+        vals = [r[j] for r in res]
+        if k in int_fields:
+            df[prefix + k] = np.asarray(vals, np.int8)[codes]
+        else:
+            fcodes, cats = pd.factorize(pd.Index(vals, dtype=object))
+            df[prefix + k] = pd.Categorical.from_codes(fcodes[codes].astype(np.int32), categories=cats)
+        del vals
 
 
 def normalize_frame(df: pd.DataFrame, n_jobs: int | None = None, log=_log,
@@ -94,7 +101,7 @@ def normalize_frame(df: pd.DataFrame, n_jobs: int | None = None, log=_log,
     names = df["business_name"].astype(str)
     codes, uniq = pd.factorize(names)
     log(f"  normalising {len(uniq):,} unique names")
-    _G["vals"] = np.asarray(uniq, dtype=object)
+    _G["vals"] = StrCol(uniq)
     res = _run(_name_worker, len(uniq), n_jobs)
     _assign(df, "n_", NAME_FIELDS, ("indic", "domain", "junk"), res, codes)
     del res, codes, uniq, names
@@ -103,8 +110,8 @@ def normalize_frame(df: pd.DataFrame, n_jobs: int | None = None, log=_log,
                                      df["country"].astype(str)])
     codes, uniq = pd.factorize(key)
     log(f"  normalising {len(uniq):,} unique addresses")
-    _G["vals"] = np.asarray(uniq.get_level_values(0), dtype=object)
-    _G["ctry"] = np.asarray(uniq.get_level_values(1), dtype=object)
+    _G["vals"] = StrCol(uniq.get_level_values(0))
+    _G["ctry"] = StrCol(uniq.get_level_values(1))
     res = _run(_addr_worker, len(uniq), n_jobs)
     _assign(df, "a_", ADDR_FIELDS, ("missing",), res, codes)
     _G.clear()

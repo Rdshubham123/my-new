@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from .normalize import skeleton
-from .utils import free, run_pool
+from .utils import free, run_pool, worker_view
 
 _G: dict = {}
 
@@ -93,9 +93,10 @@ def _keys_for(skel, alts, nospace, alpha, nums, numstreet):
 
 def _key_worker(b):
     lo, hi = b
-    cols = [c[lo:hi] for c in _G["cols"]]
+    cols = _G["cols"]
     idx, codes, strs = [], [], []
-    for i, row in enumerate(zip(*cols)):
+    for i in range(hi - lo):
+        row = tuple(c[lo + i] for c in cols)
         seen = set()
         for typ, val in _keys_for(*row):
             k = typ + ":" + val
@@ -112,7 +113,8 @@ def _key_worker(b):
 def build_keys(df: pd.DataFrame, n_jobs: int = 4, chunk: int = 50000):
     """Hashed blocking keys -> (record index int32, key type int8, hash uint64)."""
     cols_names = ["n_skel", "n_alts", "n_nospace", "a_alpha", "a_nums", "a_numstreet"]
-    _G["cols"] = [df[c].to_numpy() for c in cols_names]  # zero-copy, fork-shared
+    view = worker_view(df, cols_names)  # COW-safe, fork-shared
+    _G["cols"] = [view[c] for c in cols_names]
     res = run_pool(_key_worker, [(s, min(s + chunk, len(df))) for s in range(0, len(df), chunk)], n_jobs)
     _G.clear()
     if not res:

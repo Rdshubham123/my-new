@@ -35,7 +35,7 @@ from .blocking import BlockConfig, generate_candidates
 from .data import gt_pairs, load_split, normalize_frame
 from .decision import Calibrator, expected_f_select, threshold_select
 from .features import ALL_FEATURES, add_s1_context, build_idf, compute_pair_features
-from .utils import auto_data_dir, free, is_kaggle, log, n_workers
+from .utils import auto_data_dir, clear_strcol_cache, free, is_kaggle, log, n_workers
 
 # blocking-based target-competition features need blocking over ALL S1
 # records; training blocks only the sampled S1s, so they are left out
@@ -332,6 +332,7 @@ def run_final(cfg: FinalConfig):
     s1_ids = s1["entity_id"].to_numpy()
     t_ids = tgt["entity_id"].to_numpy()
     del s1, tgt, idf
+    clear_strcol_cache()
     free()
 
     truth = truth[truth["source1_entity_id"].isin(pd.Index(s1_ids))]
@@ -404,6 +405,7 @@ def run_final(cfg: FinalConfig):
     ts1_ids = ts1["entity_id"].to_numpy()
     tt_ids = ttgt["entity_id"].to_numpy()
     del ts1, ttgt, tidf
+    clear_strcol_cache()
     free()
     Xt, st, tt, p1t = B["X"], B["s"], B["t"], B["p1"]
     log(f"  test: {B['n_block']:,} blocked pairs -> {len(st):,} candidates "

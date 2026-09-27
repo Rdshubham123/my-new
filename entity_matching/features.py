@@ -22,7 +22,7 @@ import pandas as pd
 from rapidfuzz import fuzz
 from rapidfuzz.distance import JaroWinkler
 
-from .utils import run_pool
+from .utils import run_pool, worker_view
 
 PAIR_FEATURES = [
     # name
@@ -218,8 +218,8 @@ _T_COLS = _S_COLS + ["n_domain", "n_junk", "source"]
 def compute_pair_features(cands: pd.DataFrame, s1: pd.DataFrame, tgt: pd.DataFrame,
                           idf: dict, n_jobs: int = 4, chunk: int = 20000) -> pd.DataFrame:
     # zero-copy numpy views, shared with forked workers (nothing is pickled)
-    _G["S"] = {c: s1[c].to_numpy() for c in _S_COLS}
-    _G["T"] = {c: tgt[c].to_numpy() for c in _T_COLS}
+    _G["S"] = worker_view(s1, _S_COLS)   # COW-safe string access in workers
+    _G["T"] = worker_view(tgt, _T_COLS)
     _G["idf"] = idf
     _G["si"] = cands["s_row"].to_numpy()
     _G["ti"] = cands["t_row"].to_numpy()
@@ -256,9 +256,26 @@ def add_s1_context(df: pd.DataFrame, tgt: pd.DataFrame) -> pd.DataFrame:
     df["ctx_blk_rank_s"] = df.groupby("s_row")["blk_score"].rank(
         ascending=False, method="min").astype(np.float32)
     # siblings: an S1 usually has several S2/S3 duplicates of itself
-    df["_core"] = tgt["n_skel"].to_numpy()[df["t_row"].to_numpy()]
-    df["_fnum"] = tgt["a_first_num"].to_numpy()[df["t_row"].to_numpy()]
+    # group on integer codes (categorical columns) - no string materialisation
+    tr = df["t_row"].to_numpy()
+    df["_core"] = _codes(tgt["n_skel"])[tr]
+    fcol = tgt["a_first_num"]
+    df["_fnum"] = _codes(fcol)[tr]
     df["ctx_same_core_in_s"] = df.groupby(["s_row", "_core"])["_comb"].transform("size").astype(np.float32)
     df["ctx_same_num_in_s"] = df.groupby(["s_row", "_fnum"])["_comb"].transform("size").astype(np.float32)
-    df.loc[df["_fnum"] == "", "ctx_same_num_in_s"] = 0
+    df.loc[df["_fnum"] == _empty_code(fcol), "ctx_same_num_in_s"] = 0
     return df.drop(columns=["_comb", "_core", "_fnum"])
+
+
+def _codes(col):
+    if isinstance(col.dtype, pd.CategoricalDtype):
+        return col.cat.codes.to_numpy()
+    return pd.factorize(col)[0]
+
+
+def _empty_code(col):
+    if isinstance(col.dtype, pd.CategoricalDtype):
+        cats = col.cat.categories
+        return int(cats.get_loc("")) if "" in cats else -99
+    codes, uniq = pd.factorize(col)
+    return int(np.flatnonzero(uniq == "")[0]) if (uniq == "").any() else -99
