@@ -31,7 +31,9 @@ from .blocking import BlockConfig, generate_candidates
 from .data import gt_pairs, load_normalized
 from .features import (ALL_FEATURES, add_s1_context, add_target_context,
                        build_idf, compute_pair_features)
+from .decision import Calibrator, expected_f_select, threshold_select
 from .metrics import evaluate, fbeta
+from .stage2 import CARRY, STAGE2_FEATURES, build_stage2
 from .utils import (auto_data_dir, default_out_dir, free, is_kaggle, log,
                     n_workers)
 
@@ -53,7 +55,8 @@ def build_pairs(s1, tgt, cfg, n_jobs, keep_s_rows=None, predict_fn=None,
     competitor, as at test time), then features in S1 batches.
 
     keep_s_rows : only these S1 rows get features (training sample)
-    predict_fn  : part -> probabilities; then only (s_row, t_row, p) is kept
+    predict_fn  : part -> dict of compact arrays (stage-1 p1 + carried
+                  columns); the full feature matrix is not kept
     extra_fn    : part -> dict of extra arrays to keep (used for training)"""
     log("blocking ...")
     cands = generate_candidates(s1, tgt, cfg, log=log)
@@ -73,8 +76,8 @@ def build_pairs(s1, tgt, cfg, n_jobs, keep_s_rows=None, predict_fn=None,
         part = compute_pair_features(cands.iloc[lo:hi], s1, tgt, idf, n_jobs=n_jobs)
         part = add_s1_context(part, tgt)
         if predict_fn is not None:
-            keep = {"s_row": part["s_row"].to_numpy(), "t_row": part["t_row"].to_numpy(),
-                    "p": predict_fn(part).astype(np.float32)}
+            keep = {"s_row": part["s_row"].to_numpy(), "t_row": part["t_row"].to_numpy()}
+            keep.update(predict_fn(part))
         else:
             keep = {"s_row": part["s_row"].to_numpy(), "t_row": part["t_row"].to_numpy(),
                     "X": part[ALL_FEATURES].to_numpy(np.float32)}
@@ -91,25 +94,6 @@ def build_pairs(s1, tgt, cfg, n_jobs, keep_s_rows=None, predict_fn=None,
     del parts
     free()
     return out
-
-
-def select_mask(s_row, t_row, p, thr, alpha, one_owner=True) -> np.ndarray:
-    """Decision rule: p >= thr; each target kept only for its best S1 (the
-    one-owner constraint verified in EDA cell 8); p >= alpha * best p of the
-    S1.  Returns a boolean mask over the pairs."""
-    mask = p >= thr
-    idx = np.flatnonzero(mask)
-    if one_owner and len(idx):
-        d = pd.DataFrame({"t": t_row[idx], "p": p[idx], "i": idx}).sort_values(
-            ["t", "p"], ascending=[True, False])
-        best = d.drop_duplicates("t")["i"].to_numpy()
-        mask = np.zeros(len(p), bool)
-        mask[best] = True
-        idx = best
-    if alpha > 0 and len(idx):
-        mx = pd.Series(p[idx]).groupby(s_row[idx]).transform("max").to_numpy()
-        mask[idx[p[idx] < alpha * mx]] = False
-    return mask
 
 
 def fast_scores(s_row, y, mask, n_true_per_s, beta):
@@ -153,7 +137,8 @@ def cmd_train(a):
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     n_jobs = n_workers(a.n_jobs)
-    cfg = BlockConfig(top_k=a.top_k, top_k_name=a.top_k_name, top_k_addr=a.top_k_addr, n_jobs=n_jobs)
+    cfg = BlockConfig(top_k=a.top_k, top_k_name=a.top_k_name, top_k_addr=a.top_k_addr,
+                      k_min=a.k_min, reverse_k=a.reverse_k, n_jobs=n_jobs)
     data_dir = auto_data_dir(a.data_dir, "train")
     log(f"data dir: {data_dir} | out dir: {out} | workers: {n_jobs}")
 
@@ -201,51 +186,105 @@ def cmd_train(a):
 
     X, s_row, t_row = d["X"], d["s_row"], d["t_row"]
     params = dict(LGB_PARAMS, num_threads=n_jobs)
-    full = lgb.Dataset(X, y, feature_name=ALL_FEATURES, free_raw_data=False,
-                       params={"max_bin": 255}).construct()
-    oof = np.zeros(len(y), np.float32)
-    best_iters = []
-    for fold, (tr, va) in enumerate(GroupKFold(n_splits=a.folds).split(s_row, y, s_row)):
-        tr = tr[train_ok[tr]]
-        bst = lgb.train(params, full.subset(np.sort(tr)), num_boost_round=a.rounds,
-                        valid_sets=[full.subset(np.sort(va))],
-                        callbacks=[lgb.early_stopping(100, verbose=False)])
-        oof[va] = bst.predict(X[va], num_iteration=bst.best_iteration, num_threads=n_jobs)
-        best_iters.append(bst.best_iteration or a.rounds)
-        log(f"  fold {fold}: best_iter={best_iters[-1]}")
-        del bst
-        free()
+    folds = list(GroupKFold(n_splits=a.folds).split(s_row, y, s_row))
+
+    def oof_train(Xm, names, tag):
+        full = lgb.Dataset(Xm, y, feature_name=names, free_raw_data=False).construct()
+        oof = np.zeros(len(y), np.float32)
+        iters = []
+        for fold, (tr, va) in enumerate(folds):
+            tr = tr[train_ok[tr]]
+            bst = lgb.train(params, full.subset(np.sort(tr)), num_boost_round=a.rounds,
+                            valid_sets=[full.subset(np.sort(va))],
+                            callbacks=[lgb.early_stopping(100, verbose=False)])
+            oof[va] = bst.predict(Xm[va], num_iteration=bst.best_iteration, num_threads=n_jobs)
+            iters.append(bst.best_iteration or a.rounds)
+            log(f"  [{tag}] fold {fold}: best_iter={iters[-1]}")
+            del bst
+            free()
+        n_rounds = int(np.mean(iters) * 1.1) + 1
+        final = lgb.train(params, full.subset(np.flatnonzero(train_ok)), num_boost_round=n_rounds)
+        return oof, final
+
+    log("stage 1 (pair model) ...")
+    oof1, bst1 = oof_train(X, ALL_FEATURES, "stage1")
+    bst1.save_model(str(out / "model.txt"))
+    pd.Series(bst1.feature_importance("gain"), index=ALL_FEATURES).sort_values(
+        ascending=False).to_csv(out / "feature_importance.csv", header=["gain"])
 
     metric = f"{a.metric}_fbeta"
     ntps = np.where(eval_rows, n_true_per_s, 0.0)  # score only the sampled S1s
+    score = lambda mask: fast_scores(s_row, y, mask, ntps, a.beta)  # noqa: E731
+
+    s2_names = STAGE2_FEATURES
+    full_sample = len(keep_rows) == len(s1)
+    if not full_sample:  # other S1s have no p1 -> competition feats would shift at test time
+        s2_names = [f for f in STAGE2_FEATURES if f not in ("p1_other_max_t", "p1_gap_t", "p1_n10_t")]
+    use_stage2 = not a.no_stage2
+    if use_stage2:
+        log("stage 2 (sibling / competition graph features) ...")
+        carry = {c: X[:, ALL_FEATURES.index(c)] for c in CARRY}
+        X2 = build_stage2(s_row, t_row, oof1, carry, tgt, n_jobs)
+        X2 = X2[:, [STAGE2_FEATURES.index(f) for f in s2_names]]
+        oof2, bst2 = oof_train(X2, s2_names, "stage2")
+        bst2.save_model(str(out / "model_stage2.txt"))
+        p_final = oof2
+        s1_only = score(threshold_select(s_row, t_row, oof1, 0.5))
+        s2_only = score(threshold_select(s_row, t_row, oof2, 0.5))
+        log(f"  @0.5 {metric}: stage1={s1_only[metric]:.5f} stage2={s2_only[metric]:.5f}")
+    else:
+        p_final = oof1
+    del X
+    free()
+
+    # ---- calibration + decision rule search on OOF
+    calib = Calibrator().fit(p_final, y)
+    q = calib(p_final)
+    missed = max(float(ntps.sum() - y.sum()), 0.0)
+    lam_hat = missed / max(int(eval_rows.sum()), 1)
     best = None
     for thr in np.round(np.arange(0.10, 0.96, 0.025), 3):
-        for alpha in (0.0, 0.2, 0.4, 0.6, 0.8):
-            m = fast_scores(s_row, y, select_mask(s_row, t_row, oof, thr, alpha), ntps, a.beta)
-            if best is None or m[metric] > best[2][metric]:
-                best = (float(thr), float(alpha), m)
-    thr, alpha, _ = best
-    sel = select_mask(s_row, t_row, oof, thr, alpha)
+        for alpha in (0.0, 0.3, 0.6):
+            m = score(threshold_select(s_row, t_row, q, thr, alpha))
+            if best is None or m[metric] > best[1][metric]:
+                best = ({"rule": "threshold", "thr": float(thr), "alpha": float(alpha)}, m)
+    for lam in (0.0, lam_hat):
+        for eb in (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0):
+            for mq in (0.0, 0.05, 0.2):
+                m = score(expected_f_select(s_row, t_row, q, a.beta, lam, eb, mq))
+                if m[metric] > best[1][metric]:
+                    best = ({"rule": "expected_f", "lam": float(lam), "empty_bias": eb,
+                             "min_q": mq}, m)
+    rule = best[0]
+    sel = apply_rule(rule, s_row, t_row, q, a.beta)
     pred = pd.DataFrame({"source1_entity_id": s1_ids[s_row[sel]], "matched_id": t_ids[t_row[sel]]})
     m = evaluate(pred, truth_sub, sub_ids, a.beta)
-    log(f"OOF best rule: thr={thr} alpha={alpha}")
+    log(f"OOF best rule: {rule}")
     for k, v in m.items():
         log(f"  {k:16s} {v:.5f}" if isinstance(v, float) else f"  {k:16s} {v:,}")
 
-    n_rounds = int(np.mean(best_iters) * 1.1) + 1
-    log(f"final model on all clean rows ({int(train_ok.sum()):,}), rounds={n_rounds}")
-    bst = lgb.train(params, full.subset(np.flatnonzero(train_ok)), num_boost_round=n_rounds)
-    bst.save_model(str(out / "model.txt"))
-    imp = pd.Series(bst.feature_importance("gain"), index=ALL_FEATURES).sort_values(ascending=False)
-    imp.to_csv(out / "feature_importance.csv", header=["gain"])
-    report = {"threshold": thr, "alpha": alpha, "beta": a.beta, "metric": metric,
-              "oof": m, "blocking_recall": float(recall_ceiling),
-              "block_cfg": {"top_k": a.top_k, "top_k_name": a.top_k_name, "top_k_addr": a.top_k_addr},
+    report = {"rule": rule, "beta": a.beta, "metric": metric, "oof": m,
+              "blocking_recall": float(recall_ceiling), "stage2": use_stage2,
+              "stage2_features": s2_names, "calibrator": calib.to_dict(),
+              "block_cfg": {"top_k": a.top_k, "top_k_name": a.top_k_name,
+                            "top_k_addr": a.top_k_addr, "k_min": a.k_min, "reverse_k": a.reverse_k},
               "n_s1": int(len(keep_rows)), "n_pairs": int(len(y)),
               "n_doubtful": int(doubt.sum()), "features": ALL_FEATURES}
     (out / "config.json").write_text(json.dumps(report, indent=2, default=float))
-    log(f"saved model + config to {out}")
+    log(f"saved models + config to {out}")
     return report
+
+
+def apply_rule(rule, s_row, t_row, q, beta):
+    if rule["rule"] == "threshold":
+        return threshold_select(s_row, t_row, q, rule["thr"], rule["alpha"])
+    return expected_f_select(s_row, t_row, q, beta, rule["lam"], rule["empty_bias"], rule["min_q"])
+
+
+def block_cfg_from(conf, n_jobs):
+    bc = conf["block_cfg"]
+    return BlockConfig(top_k=bc["top_k"], top_k_name=bc["top_k_name"], top_k_addr=bc["top_k_addr"],
+                       k_min=bc.get("k_min", 12), reverse_k=bc.get("reverse_k", 5), n_jobs=n_jobs)
 
 
 # ---------------------------------------------------------------------------
@@ -257,20 +296,35 @@ def cmd_predict(a):
     out = Path(a.out_dir)
     n_jobs = n_workers(a.n_jobs)
     conf = json.loads((out / "config.json").read_text())
-    bc = conf["block_cfg"]
-    cfg = BlockConfig(top_k=bc["top_k"], top_k_name=bc["top_k_name"],
-                      top_k_addr=bc["top_k_addr"], n_jobs=n_jobs)
-    bst = lgb.Booster(model_file=str(out / "model.txt"))
+    cfg = block_cfg_from(conf, n_jobs)
+    bst1 = lgb.Booster(model_file=str(out / "model.txt"))
     data_dir = auto_data_dir(a.data_dir, a.split)
     log(f"data dir: {data_dir} | split: {a.split}")
 
     s1, tgt, gt = load_normalized(data_dir, a.split, None if a.no_cache else out / "cache", n_jobs)
     feats = conf["features"]
-    d = build_pairs(s1, tgt, cfg, n_jobs, predict_fn=lambda part: bst.predict(
-        part[feats].to_numpy(np.float32), num_threads=n_jobs))
-    sel = select_mask(d["s_row"], d["t_row"], d["p"], conf["threshold"], conf["alpha"])
-    pairs = pd.DataFrame({"source1_entity_id": s1["entity_id"].to_numpy()[d["s_row"][sel]],
-                          "matched_id": tgt["entity_id"].to_numpy()[d["t_row"][sel]]})
+
+    def stage1(part):
+        res = {"p1": bst1.predict(part[feats].to_numpy(np.float32), num_threads=n_jobs).astype(np.float32)}
+        res.update({c: part[c].to_numpy(np.float32) for c in CARRY})
+        return res
+
+    d = build_pairs(s1, tgt, cfg, n_jobs, predict_fn=stage1)
+    s_row, t_row = d["s_row"], d["t_row"]
+    if conf.get("stage2"):
+        log("stage 2 ...")
+        bst2 = lgb.Booster(model_file=str(out / "model_stage2.txt"))
+        X2 = build_stage2(s_row, t_row, d["p1"], d, tgt, n_jobs)
+        names = conf["stage2_features"]
+        X2 = X2[:, [STAGE2_FEATURES.index(f) for f in names]]
+        p = bst2.predict(X2, num_threads=n_jobs)
+        del X2
+    else:
+        p = d["p1"]
+    q = Calibrator.from_dict(conf["calibrator"])(p)
+    sel = apply_rule(conf["rule"], s_row, t_row, q, conf["beta"])
+    pairs = pd.DataFrame({"source1_entity_id": s1["entity_id"].to_numpy()[s_row[sel]],
+                          "matched_id": tgt["entity_id"].to_numpy()[t_row[sel]]})
 
     agg = pairs.groupby("source1_entity_id")["matched_id"].agg(",".join)
     sub = pd.DataFrame({"source1_entity_id": s1["entity_id"]})
@@ -309,10 +363,14 @@ def _add_train_args(t):
     t.add_argument("--folds", type=int, default=5)
     t.add_argument("--rounds", type=int, default=3000)
     t.add_argument("--beta", type=float, default=0.5)
-    t.add_argument("--metric", choices=["micro", "macro"], default="micro")
+    t.add_argument("--metric", choices=["micro", "macro"], default="macro",
+                   help="official metric = F0.5 per S1 averaged (macro)")
+    t.add_argument("--no-stage2", action="store_true", help="skip the sibling/competition stage")
     t.add_argument("--keep-singletons", action="store_true",
                    help="keep S1 records without any true match in the TRAINING folds")
-    t.add_argument("--top-k", type=int, default=40)
+    t.add_argument("--top-k", type=int, default=60)
+    t.add_argument("--k-min", type=int, default=12)
+    t.add_argument("--reverse-k", type=int, default=5)
     t.add_argument("--top-k-name", type=int, default=10)
     t.add_argument("--top-k-addr", type=int, default=10)
 

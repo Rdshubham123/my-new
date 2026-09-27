@@ -40,9 +40,12 @@ TYPE_CODE = {k: i for i, k in enumerate(KEY_TYPES)}
 
 @dataclass
 class BlockConfig:
-    top_k: int = 40
+    top_k: int = 60          # k_max of the adaptive forward list
+    k_min: int = 12          # always keep this many per S1
+    adapt_ratio: float = 0.25  # beyond k_min keep only score >= ratio * top1 (SABER-style)
     top_k_name: int = 10
     top_k_addr: int = 10
+    reverse_k: int = 5       # bidirectional: each target keeps its top-R S1 records
     pair_budget: int = 5_000_000  # max expanded postings per chunk (~0.6 GB temp)
     max_df_frac: float = 0.01
     n_jobs: int = 4
@@ -136,7 +139,7 @@ def generate_candidates(s1: pd.DataFrame, tgt: pd.DataFrame, cfg: BlockConfig,
 
     if s1_rows is None:
         s1_rows = np.arange(len(s1))
-    out = []
+    out, rev_pool = [], []
     s_ctry = s1["country"].astype(str).to_numpy()
     t_ctry = tgt["country"].astype(str).to_numpy()
     for country in sorted(pd.unique(s_ctry[s1_rows])):
@@ -210,18 +213,57 @@ def generate_candidates(s1: pd.DataFrame, tgt: pd.DataFrame, cfg: BlockConfig,
             nkeys = np.bincount(pinv)
             ps = up // (n_t + 1)
             pt = up % (n_t + 1)
-            m = (_topk_mask(ps, score, cfg.top_k)
-                 | _topk_mask(ps, sname, cfg.top_k_name)
+            # forward, adaptive K: rank < k_min OR (rank < k_max AND score >= ratio*top1)
+            rank = _rank_in_group(ps, score)
+            top1 = _group_max(ps, score)
+            fwd = (rank < cfg.k_min) | ((rank < cfg.top_k) & (score >= cfg.adapt_ratio * top1))
+            m = (fwd | _topk_mask(ps, sname, cfg.top_k_name)
                  | _topk_mask(ps, saddr, cfg.top_k_addr))
-            out.append(pd.DataFrame({
-                "s_row": s_rows[ps[m]].astype(np.int32), "t_row": t_rows[pt[m]].astype(np.int32),
-                "blk_score": score[m].astype(np.float32),
-                "blk_name": sname[m].astype(np.float32),
-                "blk_addr": saddr[m].astype(np.float32),
-                "blk_nkeys": nkeys[m].astype(np.int16),
-            }))
+            # reverse direction (target -> S1): chunk-local top-R is a superset
+            # of the global top-R, merged and re-pruned below
+            rev = _topk_mask(pt, score, cfg.reverse_k) if cfg.reverse_k else np.zeros(len(ps), bool)
+            keep = m | rev
+            frame = pd.DataFrame({
+                "s_row": s_rows[ps[keep]].astype(np.int32), "t_row": t_rows[pt[keep]].astype(np.int32),
+                "blk_score": score[keep].astype(np.float32),
+                "blk_name": sname[keep].astype(np.float32),
+                "blk_addr": saddr[keep].astype(np.float32),
+                "blk_nkeys": nkeys[keep].astype(np.int16),
+            })
+            out.append(frame[m[keep]])
+            if cfg.reverse_k:
+                rev_pool.append(frame[rev[keep]])
+                if sum(len(r) for r in rev_pool) > 4 * cfg.reverse_k * n_t:
+                    rev_pool = [_prune_reverse(pd.concat(rev_pool, ignore_index=True), cfg.reverse_k)]
+        if cfg.reverse_k and rev_pool:
+            out.append(_prune_reverse(pd.concat(rev_pool, ignore_index=True), cfg.reverse_k))
+        rev_pool = []
         del post_t, ph_uniq, ph_start, ph_len, sk
         free()
     if not out:
         return pd.DataFrame(columns=["s_row", "t_row", "blk_score", "blk_name", "blk_addr", "blk_nkeys"])
-    return pd.concat(out, ignore_index=True)
+    res = pd.concat(out, ignore_index=True).drop_duplicates(["s_row", "t_row"])
+    return res.reset_index(drop=True)
+
+
+def _rank_in_group(g, v):
+    order = np.lexsort((-v, g))
+    gs = g[order]
+    first = np.r_[True, gs[1:] != gs[:-1]] if len(gs) else np.zeros(0, bool)
+    start = np.maximum.accumulate(np.where(first, np.arange(len(gs)), 0))
+    rank = np.empty(len(g), np.int64)
+    rank[order] = np.arange(len(gs)) - start
+    return rank
+
+
+def _group_max(g, v):
+    _, inv = np.unique(g, return_inverse=True)
+    mx = np.full(inv.max() + 1 if len(inv) else 0, -np.inf)
+    np.maximum.at(mx, inv, v)
+    return mx[inv]
+
+
+def _prune_reverse(df, k):
+    """Keep each target's top-k S1 records by blocking score."""
+    df = df.sort_values(["t_row", "blk_score"], ascending=[True, False])
+    return df[df.groupby("t_row").cumcount().to_numpy() < k]

@@ -5,7 +5,8 @@ import pytest
 
 from entity_matching.metrics import evaluate
 from entity_matching.normalize import normalize_address, normalize_name, skeleton
-from entity_matching.run import select_mask
+from entity_matching.decision import Calibrator, expected_f_select, threshold_select
+from entity_matching.stage2 import top2_by_group
 from entity_matching.utils import run_pool
 
 SAME_ENTITY_NAMES = [
@@ -64,12 +65,33 @@ def test_address_patterns():
     assert f["state"] == "hdf" and "rue" in f["alpha"].split()
 
 
-def test_select_mask_one_owner():
+def test_threshold_select_one_owner():
     s = np.array([0, 1, 0])
     t = np.array([5, 5, 6])
     p = np.array([0.9, 0.95, 0.2])
-    m = select_mask(s, t, p, thr=0.5, alpha=0.0)
+    m = threshold_select(s, t, p, thr=0.5, alpha=0.0)
     assert m.tolist() == [False, True, False]  # target 5 goes to its best S1 only
+
+
+def test_expected_f_select():
+    # S1 0: two confident candidates -> take both; S1 1: weak candidate -> empty wins
+    s = np.array([0, 0, 0, 1])
+    t = np.array([1, 2, 3, 4])
+    q = np.array([0.95, 0.9, 0.05, 0.3], np.float32)
+    m = expected_f_select(s, t, q, beta=0.5)
+    assert m.tolist() == [True, True, False, False]
+    # one owner: target 7 claimed by two S1s, only the stronger keeps it
+    m = expected_f_select(np.array([0, 1]), np.array([7, 7]), np.array([0.9, 0.8], np.float32))
+    assert m.tolist() == [True, False]
+
+
+def test_top2_and_calibrator():
+    top, other = top2_by_group(np.array([0, 0, 1]), np.array([0.2, 0.9, 0.5], np.float32))
+    assert top.tolist() == pytest.approx([0.9, 0.9, 0.5])
+    assert other.tolist() == pytest.approx([0.9, 0.2, 0.0])
+    c = Calibrator().fit([0.1, 0.4, 0.6, 0.9], [0, 0, 1, 1])
+    c2 = Calibrator.from_dict(c.to_dict())
+    assert c2([0.05, 0.95]).tolist() == pytest.approx([0.0, 1.0])
 
 
 def test_metric_fbeta():
