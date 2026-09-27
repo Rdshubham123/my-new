@@ -1,0 +1,7 @@
+pandas>=1.5
+numpy>=1.23
+scikit-learn>=1.1
+lightgbm>=3.3
+rapidfuzz>=3.0
+anyascii>=0.3
+pytest>=7
