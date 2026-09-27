@@ -175,11 +175,11 @@ def cmd_train(a):
     is_singleton = n_true_per_s[d["s_row"]] == 0
     doubt = doubtful_mask(d, y)
     train_ok = ~doubt
-    if not a.keep_singletons:
+    if a.drop_singletons:
         train_ok &= ~is_singleton
     log(f"train cleaning: doubtful pairs={int(doubt.sum()):,} "
         f"(pos {int((doubt & (y == 1)).sum()):,} / neg {int((doubt & (y == 0)).sum()):,}); "
-        f"singleton-S1 pairs dropped={0 if a.keep_singletons else int(is_singleton.sum()):,}")
+        f"singleton-S1 pairs dropped={int(is_singleton.sum()) if a.drop_singletons else 0:,}")
     for c in DOUBT_COLS:
         d.pop(c)
     free()
@@ -220,7 +220,7 @@ def cmd_train(a):
     full_sample = len(keep_rows) == len(s1)
     if not full_sample:  # other S1s have no p1 -> competition feats would shift at test time
         s2_names = [f for f in STAGE2_FEATURES if f not in ("p1_other_max_t", "p1_gap_t", "p1_n10_t")]
-    use_stage2 = not a.no_stage2
+    use_stage2 = a.stage2
     if use_stage2:
         log("stage 2 (sibling / competition graph features) ...")
         carry = {c: X[:, ALL_FEATURES.index(c)] for c in CARRY}
@@ -365,9 +365,11 @@ def _add_train_args(t):
     t.add_argument("--beta", type=float, default=0.5)
     t.add_argument("--metric", choices=["micro", "macro"], default="macro",
                    help="official metric = F0.5 per S1 averaged (macro)")
-    t.add_argument("--no-stage2", action="store_true", help="skip the sibling/competition stage")
-    t.add_argument("--keep-singletons", action="store_true",
-                   help="keep S1 records without any true match in the TRAINING folds")
+    t.add_argument("--stage2", action="store_true",
+                   help="add the stacked sibling/competition model (no gain in the ablation)")
+    t.add_argument("--drop-singletons", action="store_true",
+                   help="drop S1 records without any true match from the TRAINING folds "
+                        "(kept by default: slightly better macro F0.5 in the ablation)")
     t.add_argument("--top-k", type=int, default=60)
     t.add_argument("--k-min", type=int, default=12)
     t.add_argument("--reverse-k", type=int, default=5)

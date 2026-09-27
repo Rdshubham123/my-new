@@ -58,6 +58,26 @@ Attach the dataset (for example `satwiksps/amazon-ml-challenge-2026`), then run:
 | Speed | Uses all available cores by default. Normalisation runs over unique values only, blocking is vectorised numpy, and there is a parquet-free pickle cache. |
 | Measured | 100k S1 / 450k targets synthetic: full train and predict in about 5 min on 4 cores; blocking peaks at 1.6 GB RSS. |
 
+## v2 methodology (current default)
+
+| Component | v1 | v2 |
+|---|---|---|
+| Candidate search | Fixed top-40 per S1 | Adaptive K (keep 12, then up to 60 while score ≥ 0.25 × best) **plus** reverse search, where each target keeps its top-5 S1 records |
+| Tuning metric | Micro F0.5 | **Macro F0.5 per S1** (the metric the public write-ups describe) |
+| Probabilities | Raw | Isotonic calibration on OOF predictions |
+| Decision | Global threshold | Best on OOF of: threshold rule, or the per-S1 expected-F0.5 set (plug-in GFM), both with one owner per target |
+| No-match S1 in training | Dropped | Kept (`--drop-singletons` restores v1 behaviour) |
+| Stage-2 sibling model | – | Opt-in with `--stage2` (no gain in the ablation) |
+
+Ablation on a 100k-S1 synthetic train, scored on a 50k-S1 test that includes France:
+
+| Setup | Blocking recall | Test precision | Test recall | Test macro F0.5 |
+|---|---|---|---|---|
+| v1 | 92.3% | 0.9984 | 0.8861 | 0.9610 |
+| v2 without keeping singletons | 94.8% | 0.9963 | 0.9211 | 0.9722 |
+| **v2 (default)** | **94.8%** | 0.9965 | 0.9223 | **0.9728** |
+| v2 + stage 2 | 94.8% | 0.9959 | 0.9205 | 0.9715 |
+
 ## Approach
 
 ### 1. Facts from the EDA used as hard constraints
