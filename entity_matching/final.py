@@ -140,6 +140,19 @@ def featurize(s1, tgt, s_rows, bcfg, n_jobs, idf, batch_s1, scorer=None):
     n_block = len(cands)
     log(f"  blocking: {n_block:,} pairs ({n_block / max(len(s_rows), 1):.1f} per S1) "
         f"in {time.time() - t0:.0f}s")
+    # keep only targets that appear in some candidate pair (and trim the
+    # categorical vocabularies): the feature stage then holds a fraction of
+    # the 10M-record frame
+    used = np.unique(cands["t_row"].to_numpy())
+    clear_strcol_cache()
+    tgt = tgt.iloc[used].reset_index(drop=True)
+    for c in tgt.columns:
+        if isinstance(tgt[c].dtype, pd.CategoricalDtype) and c not in ("country", "source"):
+            tgt[c] = tgt[c].cat.remove_unused_categories()
+    cands["t_row"] = np.searchsorted(used, cands["t_row"].to_numpy()).astype(np.int32)
+    del used
+    free()
+    log(f"  targets kept for features: {len(tgt):,}")
     cands = cands.sort_values("s_row", kind="stable").reset_index(drop=True)
     srow = cands["s_row"].to_numpy()
     edges = np.r_[np.searchsorted(srow, np.unique(srow)[::batch_s1]), len(srow)]
@@ -168,6 +181,7 @@ def featurize(s1, tgt, s_rows, bcfg, n_jobs, idf, batch_s1, scorer=None):
                "X": np.zeros((0, len(FEATS)), np.float32), "p1": np.zeros(0, np.float32),
                "doubt": np.zeros((0, len(DOUBT_COLS)), np.float32)}
     res["n_block"] = n_block
+    res["tgt"] = tgt  # the trimmed target frame; t indices refer to it
     return res
 
 
@@ -304,19 +318,24 @@ def validate_outputs(match_path, cand_path, test_s1_ids, test_target_ids):
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
-def run_final(cfg: FinalConfig):
-    import lightgbm as lgb  # noqa: F401  (import early: fail fast)
-    from sklearn.model_selection import GroupKFold
-
-    T0 = time.time()
+def _setup(cfg: FinalConfig):
     n_jobs = n_workers(cfg.n_jobs)
     out_dir = Path(cfg.out_dir or ("/kaggle/working" if is_kaggle() else "final_out"))
     (out_dir / "output").mkdir(parents=True, exist_ok=True)
+    work = out_dir / "_work"
+    work.mkdir(parents=True, exist_ok=True)
+    return n_jobs, out_dir, work
+
+
+def phase_a(cfg: FinalConfig):
+    import lightgbm as lgb  # noqa: F401
+    from sklearn.model_selection import GroupKFold
+    T0 = time.time()
+    n_jobs, out_dir, work = _setup(cfg)
     data_dir = auto_data_dir(cfg.data_dir, "train")
     log(f"data: {data_dir} | out: {out_dir} | workers: {n_jobs}")
     bcfg = BlockConfig(n_jobs=n_jobs)
     report = {"config": asdict(cfg)}
-
     # ===================== PHASE A: train (CPU) =====================
     log("PHASE A - train data")
     s1, tgt, gt = load_split(data_dir, "train")
@@ -337,6 +356,8 @@ def run_final(cfg: FinalConfig):
     sampled = bool(cfg.train_s1_sample) and len(s1) < n_s1_total
     tcfg = BlockConfig(n_jobs=n_jobs, reverse_k=0 if sampled else bcfg.reverse_k)
     A = featurize(s1, tgt, np.arange(len(s1)), tcfg, n_jobs, idf, cfg.batch_s1)
+    del tgt
+    tgt = A.pop("tgt")
     s1_ids = s1["entity_id"].to_numpy()
     t_ids = tgt["entity_id"].to_numpy()
     s1_ctry = s1["country"].astype(str).to_numpy()
@@ -398,7 +419,28 @@ def run_final(cfg: FinalConfig):
     Xp, yp, sp, tp_, okp, p1p = X[P], y[P], s_row[P], t_row[P], ok[P], oof1[P]
     del X, y, s_row, t_row, ok, oof1, r1, folds
     free()
+    bst1.save_model(str(out_dir / "lgb_stage1.txt"))
+    save = dict(Xp=Xp, yp=yp, sp=sp, tp_=tp_, okp=okp, p1p=p1p, n_true=n_true,
+                s1_ctry=np.asarray(s1_ctry, dtype=str))
+    if txt_s1 is not None:
+        save.update(txt_s1.to_arrays("s1_"))
+        save.update(txt_t.to_arrays("t_"))
+    np.savez(work / "A.npz", **save)
+    (work / "A.json").write_text(json.dumps({"K": int(K), "tau": float(tau), "train": report["train"]},
+                                            default=float))
+    log(f"PHASE A done in {(time.time() - T0) / 60:.1f} min")
 
+
+def phase_b(cfg: FinalConfig):
+    import lightgbm as lgb
+    T0 = time.time()
+    n_jobs, out_dir, work = _setup(cfg)
+    data_dir = auto_data_dir(cfg.data_dir, "test")
+    bcfg = BlockConfig(n_jobs=n_jobs)
+    meta = json.loads((work / "A.json").read_text())
+    K, tau = meta["K"], meta["tau"]
+    bst1 = lgb.Booster(model_file=str(out_dir / "lgb_stage1.txt"))
+    report = {}
     # ===================== PHASE B: test (CPU) =====================
     log("PHASE B - test data")
     ts1, ttgt, _ = load_split(data_dir, "test")
@@ -412,6 +454,8 @@ def run_final(cfg: FinalConfig):
         return (p >= tau) & (rank_in_s(sb, p) < K), p
 
     B = featurize(ts1, ttgt, np.arange(len(ts1)), bcfg, n_jobs, tidf, cfg.batch_s1, scorer=scorer)
+    del ttgt
+    ttgt = B.pop("tgt")
     ts1_ids = ts1["entity_id"].to_numpy()
     tt_ids = ttgt["entity_id"].to_numpy()
     ts1_ctry = ts1["country"].astype(str).to_numpy()
@@ -428,7 +472,36 @@ def run_final(cfg: FinalConfig):
                       "cands_per_s1": float(len(st) / len(ts1_ids))}
     del B
     free()
+    save = dict(Xt=Xt, st=st, tt=tt, p1t=p1t, ts1_ids=np.asarray(ts1_ids, dtype=str),
+                tt_ids=np.asarray(tt_ids, dtype=str), ts1_ctry=np.asarray(ts1_ctry, dtype=str))
+    if txt_ts1 is not None:
+        save.update(txt_ts1.to_arrays("s1_"))
+        save.update(txt_tt.to_arrays("t_"))
+    np.savez(work / "B.npz", **save)
+    (work / "B.json").write_text(json.dumps({"test": report["test"]}, default=float))
+    log(f"PHASE B done in {(time.time() - T0) / 60:.1f} min")
 
+
+def phase_c(cfg: FinalConfig):
+    from sklearn.model_selection import GroupKFold
+    T0 = time.time()
+    n_jobs, out_dir, work = _setup(cfg)
+    A = np.load(work / "A.npz")
+    B = np.load(work / "B.npz")
+    Xp, yp, sp, tp_, okp, p1p, n_true = (A[k] for k in ("Xp", "yp", "sp", "tp_", "okp", "p1p", "n_true"))
+    s1_ctry = A["s1_ctry"].astype(object)
+    Xt, st, tt, p1t = (B[k] for k in ("Xt", "st", "tt", "p1t"))
+    ts1_ids, tt_ids = B["ts1_ids"].astype(object), B["tt_ids"].astype(object)
+    ts1_ctry = B["ts1_ctry"].astype(object)
+    if cfg.use_nn and "s1_nm" in A.files and "s1_nm" in B.files:
+        txt_s1, txt_t = TextIndex.from_arrays(A, "s1_"), TextIndex.from_arrays(A, "t_")
+        txt_ts1, txt_tt = TextIndex.from_arrays(B, "s1_"), TextIndex.from_arrays(B, "t_")
+    else:
+        txt_s1 = txt_t = txt_ts1 = txt_tt = None
+    report = {"config": asdict(cfg)}
+    report.update(json.loads((work / "A.json").read_text()))
+    report.update(json.loads((work / "B.json").read_text()))
+    cand_path = out_dir / "output" / "candidate_pairs.tsv"
     # ===================== PHASE C: ensemble (GPU allowed) =====================
     use_gpu = cfg.gpu == "on" or (cfg.gpu == "auto" and gpu_available())
     log(f"PHASE C - ensemble on pruned pairs (train {len(yp):,}, test {len(st):,}); GPU={use_gpu}")
@@ -441,7 +514,6 @@ def run_final(cfg: FinalConfig):
     o, b2 = lgb_oof(Xp, yp, folds, okp, p_lgb2, 4000, "lgb-stage2", n_jobs)
     members_oof["lgb2"], members_test["lgb2"] = o, b2.predict(Xt, num_threads=n_jobs).astype(np.float32)
     b2.save_model(str(out_dir / "lgb_stage2.txt"))
-    bst1.save_model(str(out_dir / "lgb_stage1.txt"))
     for name, fn, flag in (("xgb", xgb_oof, cfg.use_xgboost), ("cat", cat_oof, cfg.use_catboost)):
         if not flag:
             continue
@@ -488,7 +560,7 @@ def run_final(cfg: FinalConfig):
         if "charnn" in names:
             blends["gbdt_best+charnn"] = [max((n for n in names if n != "charnn"), key=lambda n: solo[n]), "charnn"]
     missed = max(float(n_true.sum() - yp.sum()), 0.0)
-    lam_hat = missed / len(s1_ids)
+    lam_hat = missed / len(n_true)
     results = {}
     for bname, mem in blends.items():
         z = np.mean([logit(members_oof[m]) for m in mem], axis=0)
@@ -562,3 +634,37 @@ def run_final(cfg: FinalConfig):
     (out_dir / "report.json").write_text(json.dumps(report, indent=2, default=str))
     log(f"done in {report['runtime_min']} min -> {match_path}")
     return report
+
+
+def run_final(cfg: FinalConfig):
+    """Runs phases A, B, C in three fresh processes: each starts with clean
+    memory (no fragmentation carried over from the previous phase) and CUDA
+    is only ever initialised in phase C, after which nothing forks."""
+    import subprocess
+    import sys
+    T0 = time.time()
+    _, out_dir, work = _setup(cfg)
+    cfg_path = work / "config.json"
+    cfg_path.write_text(json.dumps(asdict(cfg)))
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parent.parent)
+               + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    for ph in ("A", "B", "C"):
+        log(f"===== starting phase {ph} in a fresh process =====")
+        r = subprocess.run([sys.executable, "-u", "-m", "entity_matching.final", "--phase", ph,
+                            "--cfg", str(cfg_path)], env=env)
+        if r.returncode != 0:
+            raise RuntimeError(f"phase {ph} failed with exit code {r.returncode}"
+                               + (" (killed: out of memory)" if r.returncode == -9 else ""))
+    log(f"all phases done in {(time.time() - T0) / 60:.1f} min")
+    shutil.rmtree(work, ignore_errors=True)  # large hand-over files; outputs are kept
+    return json.loads((out_dir / "report.json").read_text())
+
+
+if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--phase", choices=["A", "B", "C"], required=True)
+    ap.add_argument("--cfg", required=True)
+    a = ap.parse_args()
+    c = FinalConfig(**json.loads(Path(a.cfg).read_text()))
+    {"A": phase_a, "B": phase_b, "C": phase_c}[a.phase](c)

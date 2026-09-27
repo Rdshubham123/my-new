@@ -14,7 +14,7 @@ from entity_matching.final import FinalConfig, run_final  # noqa: E402
 ap = argparse.ArgumentParser()
 ap.add_argument("--data-dir", default=None)
 ap.add_argument("--out-dir", default=None)
-ap.add_argument("--train-s1-sample", type=int, default=250_000)
+ap.add_argument("--train-s1-sample", type=int, default=100_000)
 ap.add_argument("--folds", type=int, default=3)
 ap.add_argument("--gpu", choices=["auto", "on", "off"], default="auto")
 ap.add_argument("--team", default="team")

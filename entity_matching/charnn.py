@@ -51,6 +51,15 @@ class TextIndex:
                           s.cat.codes.to_numpy().astype(np.int32)))
         (self.nm, self.nc), (self.am, self.ac) = parts
 
+    def to_arrays(self, prefix):
+        return {prefix + "nm": self.nm, prefix + "nc": self.nc, prefix + "am": self.am, prefix + "ac": self.ac}
+
+    @classmethod
+    def from_arrays(cls, z, prefix):
+        obj = cls.__new__(cls)
+        obj.nm, obj.nc, obj.am, obj.ac = (z[prefix + k] for k in ("nm", "nc", "am", "ac"))
+        return obj
+
     def rows(self, idx):
         idx = np.asarray(idx)
         n = self.nm[np.maximum(self.nc[idx], 0)]

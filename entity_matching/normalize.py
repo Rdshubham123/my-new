@@ -128,7 +128,9 @@ _DOMAIN_RE = re.compile(
     r"^(?:www\.)?([a-z0-9][a-z0-9\-]*?)\.(" + "|".join(
         re.escape(t) for t in sorted(P.TLDS, key=len, reverse=True)) + r")\.?$")
 _NAME_PUNCT = re.compile(r"[^a-z0-9\s]")
-_LEGAL_MULTI = [(re.compile(r"\b" + re.escape(a) + r"\b"), b) for a, b in P.LEGAL_MULTIWORD]
+_LEGAL_MULTI_MAP = dict(P.LEGAL_MULTIWORD)
+_LEGAL_MULTI_RE = re.compile(r"\b(" + "|".join(
+    re.escape(a) for a in sorted(_LEGAL_MULTI_MAP, key=lambda k: -len(k))) + r")\b")
 _LEGAL_TOKENS = dict(P.LEGAL_TOKENS, lnc="inc", ilc="llc", iic="llc", ltdd="ltd")
 
 
@@ -158,8 +160,7 @@ def _clean_single_name(s: str, from_indic: bool):
     s = s.replace("'", "")
     s = _NAME_PUNCT.sub(" ", s)
     s = _WS.sub(" ", s).strip()
-    for rx, rep in _LEGAL_MULTI:
-        s = rx.sub(rep, s)
+    s = _LEGAL_MULTI_RE.sub(lambda m: _LEGAL_MULTI_MAP[m.group(1)], s)
 
     core, legal = [], set()
     for tok in s.split():
@@ -243,9 +244,13 @@ _IN_CODES = set(P.INDIA_STATES.values()) | set(P.INDIA_STATE_CODE_ALIASES)
 _ALL_STATE_NAMES = sorted(
     list(P.US_STATES.items()) + list(P.INDIA_STATES.items()) + list(P.FRANCE_REGIONS.items()),
     key=lambda kv: -len(kv[0]))
-_STATE_NAME_RES = [(re.compile(r"\b" + re.escape(n) + r"\b"), c) for n, c in _ALL_STATE_NAMES]
-_CITY_ALIAS_RES = [(re.compile(r"\b" + re.escape(a) + r"\b"), c)
-                   for a, c in sorted(P.CITY_ALIASES.items(), key=lambda kv: -len(kv[0]))]
+# one longest-first alternation per table instead of ~110 / ~30 separate
+# regex passes per address (5-10x faster on 9M addresses)
+_STATE_MAP = dict(_ALL_STATE_NAMES)
+_STATE_RE = re.compile(r"\b(" + "|".join(re.escape(n) for n, _ in _ALL_STATE_NAMES) + r")\b")
+_CITY_MAP = dict(P.CITY_ALIASES)
+_CITY_RE = re.compile(r"\b(" + "|".join(
+    re.escape(a) for a in sorted(P.CITY_ALIASES, key=lambda k: -len(k))) + r")\b")
 _STATE_CODES = _US_CODES | _IN_CODES | set(P.FRANCE_REGIONS.values())
 
 
@@ -272,8 +277,7 @@ def normalize_address(raw, country: str = "") -> dict:
     s = _HASH.sub(" # ", s)
     s = s.replace(".", " ").replace(";", ",").replace("(", " ").replace(")", " ")
     s = _ADDR_PUNCT.sub(" ", s)
-    for rx, c in _CITY_ALIAS_RES:
-        s = rx.sub(c, s)
+    s = _CITY_RE.sub(lambda m: _CITY_MAP[m.group(1)], s)
 
     alpha, nums, numparts, numstreet, states = [], [], set(), [], set()
     ordered = []
@@ -287,10 +291,10 @@ def normalize_address(raw, country: str = "") -> dict:
                 or country not in ("US", "India")):
             states.add(P.INDIA_STATE_CODE_ALIASES.get(comp, comp) if country == "India" else comp)
             continue
-        for rx, c in _STATE_NAME_RES:
-            if rx.search(comp):
-                states.add(c)
-                comp = rx.sub(" ", comp)
+        if _STATE_RE.search(comp):
+            for m in _STATE_RE.finditer(comp):
+                states.add(_STATE_MAP[m.group(1)])
+            comp = _STATE_RE.sub(" ", comp)
         toks = comp.split()
         prev_num = None
         for i, tok in enumerate(toks):

@@ -99,7 +99,7 @@ def _init_worker():
         pass
 
 
-def run_pool(fn, tasks, n_jobs: int, ordered: bool = True, timeout: float = 3600.0):
+def run_pool(fn, tasks, n_jobs: int, ordered: bool = True, timeout: float = 600.0):
     """Map `fn` over `tasks` with a fork pool.
 
     - fork shares the big read-only arrays with workers (no pickling, no copy)
@@ -113,6 +113,10 @@ def run_pool(fn, tasks, n_jobs: int, ordered: bool = True, timeout: float = 3600
     results = [None] * len(tasks)
     done = [False] * len(tasks)
     ctx = get_context("fork")
+    # freeze the parent's objects out of the cyclic GC: a worker's GC pass
+    # would otherwise write to every inherited container header (more COW)
+    gc.collect()
+    gc.freeze()
     # maxtasksperchild recycles workers: any memory a worker accumulated
     # (copy-on-write pages, caches) is returned to the OS regularly
     pool = ctx.Pool(min(n_jobs, len(tasks)), initializer=_init_worker, maxtasksperchild=25)
@@ -133,6 +137,7 @@ def run_pool(fn, tasks, n_jobs: int, ordered: bool = True, timeout: float = 3600
         if not all(done):
             pool.terminate()
         pool.join()
+        gc.unfreeze()
     for i, ok in enumerate(done):
         if not ok:
             results[i] = fn(tasks[i])

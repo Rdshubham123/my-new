@@ -43,7 +43,7 @@ XGBoost, CatBoost) are MIT/Apache-2.0 and far below 8B parameters."""))
 
 cells.append(md("## 0 · Configuration"))
 cells.append(code("""TEAM_NAME = "team"          # <- your team name (used for the zip file name)
-TRAIN_S1_SAMPLE = 250_000   # S1 records used for training (150_000 = faster, 0 = all)
+TRAIN_S1_SAMPLE = 100_000   # S1 records used for training (plenty for the models; keeps RAM and time safe)
 FOLDS = 3
 GPU = "auto"                # auto | on | off
 RUN_SMOKE_TEST = True       # ~1 min synthetic end-to-end check before the real run
@@ -114,8 +114,8 @@ if RUN_SMOKE_TEST:
     print("SMOKE TEST PASSED")"""))
 
 cells.append(md("""## 5 · Real run (fresh subprocess, live log)
-Runtime depends on the data. As a rough estimate on 4 vCPUs: normalisation ~15 min, blocking and features ~25 min,
-stage 1 ~15 min, and the ensemble 5–15 min (GPU). If time is short, set `TRAIN_S1_SAMPLE = 150_000`.
+The pipeline runs as **three fresh processes**: A (train), B (test), then C (ensemble, GPU). Each starts with clean memory,
+and CUDA is initialised only in C. Rough runtime on Kaggle: A ~25 min, B ~35 min, C ~10 min.
 The log shows RAM per step, the blocking recall ceiling, candidates per S1, the OOF score of every member and blend,
 and the final validation."""))
 cells.append(code("""cmd = [sys.executable, "-u", "run_final.py", "--train-s1-sample", str(TRAIN_S1_SAMPLE),
@@ -125,8 +125,7 @@ with open("run_log.txt", "w") as logf:
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     for line in proc.stdout:
         logf.write(line)
-        if "features batch" not in line or line.rstrip().endswith("0 pairs"):
-            print(line, end="")
+        print(line, end="")  # every line: progress is always visible
     proc.wait()
 print("exit code:", proc.returncode)
 assert proc.returncode == 0, "run failed - see run_log.txt\""""))
