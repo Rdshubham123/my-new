@@ -17,11 +17,17 @@ entity_matching/
   run.py        CLI: kaggle | train | predict | synth
   synth.py      synthetic data generator with the same noise (used for testing)
   utils.py      Kaggle path detection, deadlock-safe process pool, RAM logging
-kaggle_run.ipynb  3-cell notebook for Kaggle
+entity_matching_full.ipynb  self-contained notebook: all code inline, synthetic demo with outputs, real-data run
+kaggle_run.ipynb  3-cell notebook that clones this repo instead
+tools/build_notebook.py     regenerates the full notebook from the package sources
 tests/            unit tests built from real examples in the EDA
 ```
 
 ## Run on Kaggle
+
+**Easiest option:** upload `entity_matching_full.ipynb` to Kaggle, attach the dataset and choose **Run All**. It needs no clone and no internet (if `anyascii` can't be installed, a built-in transliterator is used).
+
+Or from a notebook cell:
 
 Attach the dataset (for example `satwiksps/amazon-ml-challenge-2026`), then run:
 

@@ -278,7 +278,7 @@ def cmd_predict(a):
     path = Path(a.submission or out / f"submission_{a.split}.tsv")
     sub.to_csv(path, sep="\t", index=False)
     log(f"wrote {path} ({len(pairs):,} links for {len(sub):,} S1 records)")
-    if is_kaggle() and a.split == "test":
+    if is_kaggle() and a.split == "test" and str(data_dir).startswith("/kaggle/input"):
         shutil.copy(path, "/kaggle/working/submission.tsv")
         log("copied to /kaggle/working/submission.tsv")
     if gt is not None:
