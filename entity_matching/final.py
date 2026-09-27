@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 
 from .blocking import BlockConfig, generate_candidates
+from .charnn import TextIndex, nn_oof
 from .data import gt_pairs, load_split, normalize_frame
 from .decision import Calibrator, expected_f_select, threshold_select
 from .features import ALL_FEATURES, add_s1_context, build_idf, compute_pair_features
@@ -57,6 +58,10 @@ class FinalConfig:
     gpu: str = "auto"                  # auto | on | off
     use_xgboost: bool = True
     use_catboost: bool = True
+    use_nn: bool = True                # char cross-attention member (GPU; CPU only if nn_on_cpu)
+    nn_on_cpu: bool = False
+    nn_budget_s: float = 1200.0
+    per_country_rules: bool = True
     batch_s1: int = 100_000
     seed: int = 42
     team_name: str = "team"
@@ -84,7 +89,7 @@ def rank_in_s(s_row, v):
     return r
 
 
-def macro_micro(s_row, y, sel, n_true, beta=0.5):
+def macro_micro(s_row, y, sel, n_true, beta=0.5, univ=None):
     """F-beta per S1 averaged over ALL S1 in the universe (len(n_true)).
     n_true[s] counts every true link of S1 s, including ones blocking or
     pruning lost (they are false negatives)."""
@@ -97,6 +102,9 @@ def macro_micro(s_row, y, sel, n_true, beta=0.5):
         r = np.where(n_true > 0, tp / n_true, np.where(npred > 0, 0.0, 1.0))
         f = np.where((p + r) > 0, (1 + b2) * p * r / (b2 * p + r), 0.0)
     f = np.where((npred == 0) & (n_true == 0), 1.0, f)
+    if univ is not None:  # average over a subset of S1 (e.g. one country)
+        f, p, r = f[univ], p[univ], r[univ]
+        tp, npred, n_true = tp[univ], npred[univ], n_true[univ]
     P = tp.sum() / npred.sum() if npred.sum() else 1.0
     R = tp.sum() / n_true.sum() if n_true.sum() else 1.0
     micro = (1 + b2) * P * R / (b2 * P + R) if (P + R) else 0.0
@@ -110,14 +118,14 @@ def apply_rule(rule, s_row, t_row, q, beta):
     return expected_f_select(s_row, t_row, q, beta, rule["lam"], rule["empty_bias"], rule["min_q"])
 
 
-def tune_rule(s_row, t_row, y, q, n_true, beta, lam_hat):
+def tune_rule(s_row, t_row, y, q, n_true, beta, lam_hat, univ=None):
     best = None
     grid = [{"rule": "threshold", "thr": float(t), "alpha": a}
             for t in np.round(np.arange(0.15, 0.96, 0.025), 3) for a in (0.0, 0.3, 0.6)]
     grid += [{"rule": "expected_f", "lam": lam, "empty_bias": eb, "min_q": mq}
              for lam in (0.0, lam_hat) for eb in (0.5, 0.75, 1.0, 1.5, 2.0, 3.0) for mq in (0.0, 0.05)]
     for rule in grid:
-        m = macro_micro(s_row, y, apply_rule(rule, s_row, t_row, q, beta), n_true, beta)
+        m = macro_micro(s_row, y, apply_rule(rule, s_row, t_row, q, beta), n_true, beta, univ)
         if best is None or m["macro_f05"] > best[1]["macro_f05"]:
             best = (rule, m)
     return best
@@ -331,6 +339,8 @@ def run_final(cfg: FinalConfig):
     A = featurize(s1, tgt, np.arange(len(s1)), tcfg, n_jobs, idf, cfg.batch_s1)
     s1_ids = s1["entity_id"].to_numpy()
     t_ids = tgt["entity_id"].to_numpy()
+    s1_ctry = s1["country"].astype(str).to_numpy()
+    txt_s1, txt_t = (TextIndex(s1), TextIndex(tgt)) if cfg.use_nn else (None, None)
     del s1, tgt, idf
     clear_strcol_cache()
     free()
@@ -404,6 +414,8 @@ def run_final(cfg: FinalConfig):
     B = featurize(ts1, ttgt, np.arange(len(ts1)), bcfg, n_jobs, tidf, cfg.batch_s1, scorer=scorer)
     ts1_ids = ts1["entity_id"].to_numpy()
     tt_ids = ttgt["entity_id"].to_numpy()
+    ts1_ctry = ts1["country"].astype(str).to_numpy()
+    txt_ts1, txt_tt = (TextIndex(ts1), TextIndex(ttgt)) if cfg.use_nn else (None, None)
     del ts1, ttgt, tidf
     clear_strcol_cache()
     free()
@@ -442,6 +454,17 @@ def run_final(cfg: FinalConfig):
                     members_oof[name], members_test[name] = fn(Xp, yp, folds, okp, Xt, False, n_jobs, cfg.seed)
                 except Exception as e2:
                     log(f"    {name} skipped ({type(e2).__name__}: {e2})")
+    if cfg.use_nn and (use_gpu or cfg.nn_on_cpu):
+        try:
+            members_oof["charnn"], members_test["charnn"] = nn_oof(
+                txt_s1, sp, txt_t, tp_, Xp, yp, folds, okp, txt_ts1, st, txt_tt, tt, Xt,
+                gpu=use_gpu, n_jobs=n_jobs, seed=cfg.seed, budget_s=cfg.nn_budget_s)
+        except Exception as e:  # never let the deep member break the run
+            log(f"    charnn skipped ({type(e).__name__}: {e})")
+    elif cfg.use_nn:
+        log("    charnn skipped (no GPU)")
+    del txt_s1, txt_t, txt_ts1, txt_tt
+    free()
     names = list(members_oof)
     for nm in names:
         mm = macro_micro(sp, yp, threshold_select(sp, tp_, members_oof[nm], 0.5), n_true, cfg.beta)
@@ -457,6 +480,13 @@ def run_final(cfg: FinalConfig):
         second = [n for n in names if n != "lgb1"]
         if len(second) > 1:
             blends["mean_stage2"] = second
+        solo = {nm: macro_micro(sp, yp, threshold_select(sp, tp_, members_oof[nm], 0.5), n_true,
+                                cfg.beta)["macro_f05"] for nm in names}
+        top3 = sorted(names, key=lambda n: -solo[n])[:3]
+        if len(top3) == 3:
+            blends["mean_top3"] = top3
+        if "charnn" in names:
+            blends["gbdt_best+charnn"] = [max((n for n in names if n != "charnn"), key=lambda n: solo[n]), "charnn"]
     missed = max(float(n_true.sum() - yp.sum()), 0.0)
     lam_hat = missed / len(s1_ids)
     results = {}
@@ -477,9 +507,45 @@ def run_final(cfg: FinalConfig):
     report["oof"] = {"chosen_blend": bname, "members": mem, "rule": rule, **m,
                      "all_blends": {k: v[0] for k, v in results.items()}}
 
+    # per-country decision rules (countries seen in training); unseen
+    # countries such as France keep the global rule
+    zq = np.mean([logit(members_oof[mm]) for mm in mem], axis=0)
+    q_oof = cal(1 / (1 + np.exp(-zq)))
+    country_rules = {}
+    if cfg.per_country_rules:
+        row_ctry = s1_ctry[sp]
+        for c in sorted(set(s1_ctry)):
+            univ = s1_ctry == c
+            if univ.sum() < 2000:
+                continue
+            rm = row_ctry == c
+            g = macro_micro(sp[rm], yp[rm], apply_rule(rule, sp[rm], tp_[rm], q_oof[rm], cfg.beta),
+                            n_true, cfg.beta, univ)["macro_f05"]
+            rc, mc = tune_rule(sp[rm], tp_[rm], yp[rm], q_oof[rm], n_true, cfg.beta, lam_hat, univ)
+            log(f"  country {c:8s}: global rule {g:.5f} -> own rule {mc['macro_f05']:.5f} {rc}")
+            if mc["macro_f05"] > g + 2e-4:
+                country_rules[c] = rc
+        if country_rules:
+            sel_oof = np.zeros(len(yp), bool)
+            row_ctry = s1_ctry[sp]
+            for c in set(row_ctry):
+                rm = row_ctry == c
+                sel_oof[rm] = apply_rule(country_rules.get(c, rule), sp[rm], tp_[rm], q_oof[rm], cfg.beta)
+            m2 = macro_micro(sp, yp, sel_oof, n_true, cfg.beta)
+            log(f"  per-country rules: OOF macro F0.5 {m['macro_f05']:.5f} -> {m2['macro_f05']:.5f}")
+            if m2["macro_f05"] > m["macro_f05"]:
+                m = m2
+                report["oof"].update({**m2, "country_rules": country_rules})
+            else:
+                country_rules = {}
+
     zt = np.mean([logit(members_test[mm]) for mm in mem], axis=0)
     qt = cal(1 / (1 + np.exp(-zt)))
-    sel = apply_rule(rule, st, tt, qt, cfg.beta)
+    sel = np.zeros(len(st), bool)
+    t_ctry_rows = ts1_ctry[st]
+    for c in set(t_ctry_rows):
+        rm = t_ctry_rows == c
+        sel[rm] = apply_rule(country_rules.get(c, rule), st[rm], tt[rm], qt[rm], cfg.beta)
     match_path = out_dir / "output" / "matching_results.tsv"
     res = write_lists(match_path, ts1_ids, st[sel], tt_ids[tt[sel]], "matched_entity_ids")
     n_links = int(sel.sum())

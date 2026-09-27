@@ -5,7 +5,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 PKG = REPO / "entity_matching"
 MODULES = ["__init__.py", "patterns.py", "normalize.py", "utils.py", "data.py", "blocking.py",
-           "features.py", "decision.py", "stage2.py", "metrics.py", "synth.py", "final.py"]
+           "features.py", "decision.py", "stage2.py", "metrics.py", "synth.py", "charnn.py", "final.py"]
 
 md, code = nbf.v4.new_markdown_cell, nbf.v4.new_code_cell
 cells = []
@@ -27,7 +27,7 @@ then **Run All**. The notebook writes:
 |---|---|---|
 | A · train | CPU, fork pools | Hardcoded noise normalisation (Indic scripts, legal forms, OCR digits, junk, DBA, NULLs, abbreviations, FR/US/IN states) → IDF-weighted multi-key blocking, both directions, adaptive K, per-record posting budget → 75 pair/rule/context features → **stage-1 LightGBM** (GroupKFold OOF) → **learned pruning** (smallest candidate set keeping ≥ 99.8% of reachable true links) |
 | B · test | CPU, fork pools | Same features; stage-1 scores each batch and prunes it immediately → **`candidate_pairs.tsv` averages ~4 candidates per S1** (a smaller set ranks higher in the final evaluation) |
-| C · ensemble | **GPU**, no more forks | LightGBM + **XGBoost (CUDA)** + **CatBoost (GPU)** trained on the pruned pairs with OOF. The blend (single or logit-mean) and the decision rule (threshold, or per-S1 **expected-F0.5 set**) are both chosen on OOF macro F0.5. Isotonic calibration; one owner per target |
+| C · ensemble | **GPU**, no more forks | LightGBM + **XGBoost (CUDA)** + **CatBoost (GPU)** + **charnn**, a deep character-level cross-attention matcher (ESIM-style soft alignment over name and address bytes, fused with the tabular features, mixed precision). All are trained on the pruned pairs with the same OOF folds. The blend (single, logit-mean of all / top-3, or best GBDT + charnn) and the decision rule (threshold, or per-S1 **expected-F0.5 set**, optionally **per country**) are chosen on OOF macro F0.5. Isotonic calibration; one owner per target |
 
 **Noise separation:** true pairs with no name, address or number evidence ("unlearnable") and non-links
 indistinguishable from a link ("twins") are removed from **training only**. Validation always scores every held-out S1,
@@ -60,7 +60,7 @@ def ensure(pkg, mod=None):
             importlib.import_module(mod or pkg); print(f"installed {pkg}")
         except ImportError:
             print(f"MISSING   {pkg}" + (" (built-in transliterator fallback)" if pkg == "anyascii" else ""))
-for p in ["pandas", "numpy", "scikit-learn:sklearn", "lightgbm", "xgboost", "catboost", "rapidfuzz", "anyascii"]:
+for p in ["pandas", "numpy", "scikit-learn:sklearn", "lightgbm", "xgboost", "catboost", "rapidfuzz", "anyascii", "torch"]:
     n, _, m = p.partition(":"); ensure(n, m or None)
 
 WORK = "/kaggle/working" if os.path.isdir("/kaggle/working") else os.getcwd()
@@ -155,7 +155,7 @@ shutil.copytree("entity_matching", os.path.join(pkg_root, "src", "entity_matchin
                 ignore=shutil.ignore_patterns("__pycache__"))
 shutil.copy("run_final.py", os.path.join(pkg_root, "src", "run_final.py"))
 vers = []
-for p in ["pandas", "numpy", "scikit-learn", "lightgbm", "xgboost", "catboost", "rapidfuzz", "anyascii"]:
+for p in ["pandas", "numpy", "scikit-learn", "lightgbm", "xgboost", "catboost", "rapidfuzz", "anyascii", "torch"]:
     try: vers.append(f"{p}=={im.version(p)}")
     except Exception: pass
 open(os.path.join(pkg_root, "requirements.txt"), "w").write("\\n".join(vers) + "\\n")
@@ -216,11 +216,16 @@ only in test, so no rule depends on the countries seen in training.
   token overlap, alias, domain, acronym and legal-form agreement, name frequency; address fuzzy and IDF overlap,
   number agreement (exact / compound / parts / house number / number+street, **rarity-weighted shared and
   conflicting numbers**), state and postal agreement; hardcoded rule flags; per-S1 rank/gap/sibling context.
-- Stage 1: LightGBM (GroupKFold by S1). Stage 2 on pruned pairs: LightGBM + XGBoost (CUDA) + CatBoost (GPU),
-  each with OOF predictions. The blend (single model or logit-mean) is chosen on OOF macro F0.5, then isotonic
-  calibration.
+- Stage 1: LightGBM (GroupKFold by S1). Stage 2 on pruned pairs: LightGBM + XGBoost (CUDA) + CatBoost (GPU)
+  + **charnn**, a deep character-level cross-attention matcher: 96-byte name+address sequences, a shared residual
+  char-CNN, ESIM-style soft alignment with [h−a, h⊙a] comparison, mean/max pooling, fused with the 75
+  standardised tabular features. It is trained fold-wise with mixed precision and a wall-clock budget. All members
+  produce OOF predictions; the blend (single, logit-mean of all / top-3, best GBDT + charnn) is chosen on OOF
+  macro F0.5, then isotonic calibration.
 - Decision: best on OOF of a threshold rule or the per-S1 **expected-F0.5 set** (plug-in General F-measure Maximizer:
-  choose k maximising 1.25·Σq/(0.25·E|T|+k) against P(empty)), with one owner per target.
+  choose k maximising 1.25·Σq/(0.25·E|T|+k) against P(empty)), with one owner per target. A country's own rule
+  is used only when it beats the global rule on that country's OOF by > 0.0002; France (unseen) uses the global rule.
+- Country rules used: {o.get("country_rules", "none (global rule)")}.
 - Chosen: blend **{o["chosen_blend"]}** ({", ".join(o["members"])}), rule {o["rule"]}.
 
 ## 4. Validation
@@ -230,7 +235,8 @@ true links lost to blocking or pruning counted as false negatives.
 Blend comparison: {", ".join(f"{k} {v:.5f}" for k, v in o["all_blends"].items())}.
 
 ## 5. Other
-No external data, APIs or lookups. Models are LightGBM (MIT), XGBoost (Apache-2.0), CatBoost (Apache-2.0).
+No external data, APIs or lookups. Models are LightGBM (MIT), XGBoost (Apache-2.0), CatBoost (Apache-2.0),
+and a small PyTorch network (BSD-style licence, trained from scratch, about 0.37M parameters, far below 8B).
 The pipeline is deadlock-safe (all forks before CUDA; pool timeouts) and bounded in RAM (batching, posting budget).
 '''
 open(os.path.join(WORK, "Documentation_template.md"), "w").write(doc)
