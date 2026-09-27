@@ -38,6 +38,7 @@ PAIR_FEATURES = [
     "a_idf_contain", "a_ratio_alpha_nospace", "num_s", "num_t", "num_shared",
     "num_jacc", "num_t_only", "num_s_only", "num_compound_shared", "numparts_shared",
     "numparts_jacc", "first_num_eq", "numstreet_shared", "state_eq", "postal_eq",
+    "num_idf_shared", "num_idf_max", "num_idf_t_only", "first_num_conflict",
     # rules
     "r_exact_core_num", "r_skel_num", "r_domain_num", "r_alias_num",
     "r_name_only_strong", "r_addr_only_strong",
@@ -63,15 +64,18 @@ def build_idf(tgt: pd.DataFrame) -> dict:
     idf = {}
     for country, grp in tgt.groupby(tgt["country"].astype(str), observed=True):
         n = len(grp)
-        cn, ca = Counter(), Counter()
+        cn, ca, cu = Counter(), Counter(), Counter()
         for s in grp["n_skel"]:
             cn.update(set(s.split()))
         for s in grp["a_alpha"]:
             ca.update(set(s.split()))
+        for s in grp["a_nums"]:
+            cu.update(set(s.split()))
         core_df = Counter(grp["n_skel"])
         idf[country] = {
             "n": {k: math.log1p(n / v) for k, v in cn.items()},
             "a": {k: math.log1p(n / v) for k, v in ca.items()},
+            "u": {k: math.log1p(n / v) for k, v in cu.items()},
             "core_df": dict(core_df),
             "default": math.log1p(n),
         }
@@ -111,7 +115,7 @@ def _legal_rel(a, b):
 def _pair(i, j):
     S, T = _G["S"], _G["T"]
     country = str(S["country"][i])
-    tab = _G["idf"].get(country) or {"n": {}, "a": {}, "core_df": {}, "default": 10.0}
+    tab = _G["idf"].get(country) or {"n": {}, "a": {}, "u": {}, "core_df": {}, "default": 10.0}
     d = tab["default"]
 
     sc, tc = S["n_core"][i], T["n_core"][j]
@@ -157,6 +161,12 @@ def _pair(i, j):
     exact_core = int(sc == tc and sc != "")
     exact_skel = int(ss == ts and ss != "")
     n_shared = len(shared)
+    # rarity-weighted number evidence: sharing "63/1/2" >> sharing "12"
+    ut = tab["u"]
+    num_idf = [ut.get(x, d) for x in shared]
+    num_idf_t_only = sum(ut.get(x, d) for x in (tnum - snum))
+    f_s, f_t = S["a_first_num"][i], T["a_first_num"][j]
+    first_conflict = int(bool(f_s) and bool(f_t) and f_s != f_t and f_t not in snum and f_s not in tnum)
 
     return (
         fuzz.ratio(sf, tf), fuzz.ratio(sc, tc), fuzz.token_sort_ratio(sc, tc),
@@ -179,6 +189,7 @@ def _pair(i, j):
         len(tnum - snum), len(snum - tnum), comp_shared, sp_sh, sp_sh / sp_un if sp_un else 0.0,
         int(bool(S["a_first_num"][i]) and S["a_first_num"][i] == T["a_first_num"][j]),
         len(sns & tns), state_eq, postal_eq,
+        sum(num_idf), max(num_idf, default=0.0), num_idf_t_only, first_conflict,
         # rules
         int(exact_core and n_shared > 0), int(exact_skel and n_shared > 0),
         int(T["n_domain"][j] and nospace_contain and n_shared > 0),

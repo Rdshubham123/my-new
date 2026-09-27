@@ -58,6 +58,27 @@ Attach the dataset (for example `satwiksps/amazon-ml-challenge-2026`), then run:
 | Speed | Uses all available cores by default. Normalisation runs over unique values only, blocking is vectorised numpy, and there is a parquet-free pickle cache. |
 | Measured | 100k S1 / 450k targets synthetic: full train and predict in about 5 min on 4 cores; blocking peaks at 1.6 GB RSS. |
 
+## FINAL (v3): `final_submission.ipynb`, the competition notebook
+
+Upload `final_submission.ipynb` to Kaggle, choose the **GPU T4×2** accelerator (CPU also works), attach the
+dataset, set `TEAM_NAME`, and Run All. It writes:
+- `/kaggle/working/output/matching_results.tsv`: upload this to the portal
+- `/kaggle/working/output/candidate_pairs.tsv`
+- `/kaggle/working/<TEAM_NAME>_submission.zip`: outputs, code (`src/`), README, pinned requirements, and the
+  filled-in methodology
+
+What v3 adds on top of v2 (`entity_matching/final.py`, CLI `run_final.py`):
+- **Learned pruning.** Stage-1 LightGBM scores all blocked pairs, and a (rank, probability) cut is chosen on OOF
+  to keep ≥ 99.8% of reachable true links. This takes candidates from ~25–45 per S1 down to **~4 per S1**, which
+  helps the "smaller candidate set" criterion. `candidate_pairs.tsv` is exactly the pruned set the ensemble scores.
+- **GPU ensemble** on the pruned pairs: LightGBM + XGBoost (CUDA) + CatBoost (GPU), with automatic CPU fallback.
+  The blend and decision rule are chosen on OOF macro F0.5, with isotonic calibration.
+- **New features:** rarity-weighted shared and conflicting address numbers, and a first house number conflict.
+- **Scaling:** blocking with a single sort (no pandas dedupe), a per-record posting budget, and composite-key
+  ranking. On a sampled train set only the sampled S1 records are blocked.
+- **Deadlock safety:** every fork happens before CUDA is used. The notebook runs the pipeline in a fresh
+  subprocess and runs a 1-minute synthetic smoke test first.
+
 ## v2 methodology (current default)
 
 | Component | v1 | v2 |

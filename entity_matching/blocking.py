@@ -46,6 +46,8 @@ class BlockConfig:
     top_k_name: int = 10
     top_k_addr: int = 10
     reverse_k: int = 5       # bidirectional: each target keeps its top-R S1 records
+    posting_budget: int = 2500  # max target postings expanded per S1 record
+    min_keys: int = 6        # ... but always use the 6 rarest keys
     pair_budget: int = 5_000_000  # max expanded postings per chunk (~0.6 GB temp)
     max_df_frac: float = 0.01
     n_jobs: int = 4
@@ -81,8 +83,9 @@ def _keys_for(skel, alts, nospace, alpha, nums, numstreet):
         out.append(("S", t))
     # composite keys stay rare even when the name word and the number are
     # both common (generic names such as "pediatric group", EDA cell 20)
-    num_list = list(dict.fromkeys(nums.split()))[:4]
-    for t in list(dict.fromkeys(toks))[:4]:
+    # 2 longest (≈ rarest) name tokens x first 3 numbers = at most 6 keys
+    num_list = list(dict.fromkeys(nums.split()))[:3]
+    for t in sorted(dict.fromkeys(toks), key=len, reverse=True)[:2]:
         for n in num_list:
             out.append(("C", t + "|" + n))
     return out
@@ -93,10 +96,15 @@ def _key_worker(b):
     cols = [c[lo:hi] for c in _G["cols"]]
     idx, codes, strs = [], [], []
     for i, row in enumerate(zip(*cols)):
+        seen = set()
         for typ, val in _keys_for(*row):
+            k = typ + ":" + val
+            if k in seen:  # de-duplicate per record here: no pandas pass later
+                continue
+            seen.add(k)
             idx.append(lo + i)
             codes.append(TYPE_CODE[typ])
-            strs.append(typ + ":" + val)
+            strs.append(k)
     h = pd.util.hash_array(np.array(strs, dtype=object)) if strs else np.zeros(0, np.uint64)
     return (np.asarray(idx, np.int32), np.asarray(codes, np.int8), h)
 
@@ -149,33 +157,59 @@ def generate_candidates(s1: pd.DataFrame, tgt: pd.DataFrame, cfg: BlockConfig,
             continue
         log(f"  [{country}] S1={len(s_rows):,} targets={len(t_rows):,}")
         t_idx, t_typ, t_h = build_keys(tgt.iloc[t_rows], cfg.n_jobs)
-        # de-duplicate (record, key) then document frequencies
-        pk = pd.DataFrame({"i": t_idx, "h": t_h, "c": t_typ}).drop_duplicates(["i", "h"])
-        t_idx, t_h, t_typ = pk["i"].to_numpy(), pk["h"].to_numpy(), pk["c"].to_numpy()
-        uniq, inv, cnt = np.unique(t_h, return_inverse=True, return_counts=True)
+        # one sort gives document frequencies AND posting lists (no pandas,
+        # no np.unique inverse: peak RAM ~ 3 x 8 bytes per key)
+        order = np.argsort(t_h, kind="stable")
+        post_h = t_h[order]
+        del t_h
+        post_t = t_idx[order]
+        del t_idx
+        typ_sorted = t_typ[order]
+        del t_typ, order
+        free()
+        brk = np.flatnonzero(np.r_[True, post_h[1:] != post_h[:-1]])
+        klen = np.diff(np.r_[brk, len(post_h)])
         # caps are absolute for the full data and shrink with small target sets
         eff_caps = np.maximum(20, np.minimum(caps, cfg.max_df_frac * len(t_rows))).astype(np.int64)
-        keep = cnt[inv] <= eff_caps[t_typ]
-        t_idx, t_h = t_idx[keep], t_h[keep]
-        del pk, uniq, inv, cnt, keep
-        order = np.argsort(t_h, kind="stable")
-        post_h, post_t = t_h[order], t_idx[order].astype(np.int32)
-        del t_h, t_idx, t_typ, order
-        ph_uniq, ph_start, ph_len = np.unique(post_h, return_index=True, return_counts=True)
-        del post_h
+        keep_key = klen <= eff_caps[typ_sorted[brk]]
+        del typ_sorted
+        keep_el = np.repeat(keep_key, klen)
+        post_h, post_t = post_h[keep_el], post_t[keep_el]
+        del keep_el
+        ph_len = klen[keep_key]
+        ph_start = np.r_[0, np.cumsum(ph_len)[:-1]] if len(ph_len) else np.zeros(0, np.int64)
+        ph_uniq = post_h[ph_start] if len(ph_len) else np.zeros(0, np.uint64)
+        del post_h, brk, klen, keep_key
         free()
         n_t = len(t_rows)
 
         if len(ph_uniq) == 0:
             continue
         s_idx, s_typ, s_h = build_keys(s1.iloc[s_rows], cfg.n_jobs)
-        sk = pd.DataFrame({"i": s_idx, "h": s_h, "c": s_typ}).drop_duplicates(["i", "h"])
-        pos = np.clip(np.searchsorted(ph_uniq, sk["h"].to_numpy()), 0, len(ph_uniq) - 1)
-        found = ph_uniq[pos] == sk["h"].to_numpy()
-        sk = sk[found].assign(p=pos[found])
-        sk["df"] = ph_len[sk["p"].to_numpy()]
-        sk = sk.sort_values(["i", "c", "df"])
-        sk = sk[sk.groupby(["i", "c"]).cumcount().to_numpy() < per_rec[sk["c"].to_numpy()]]
+        pos = np.clip(np.searchsorted(ph_uniq, s_h), 0, len(ph_uniq) - 1)
+        found = ph_uniq[pos] == s_h
+        s_idx, s_typ, pos = s_idx[found], s_typ[found], pos[found]
+        del s_h, found
+        dfk = ph_len[pos]
+        # keep the per_rec rarest keys of each type per S1 record
+        o = np.lexsort((dfk, s_typ, s_idx))
+        s_idx, s_typ, pos, dfk = s_idx[o], s_typ[o], pos[o], dfk[o]
+        grp = np.r_[True, (s_idx[1:] != s_idx[:-1]) | (s_typ[1:] != s_typ[:-1])]
+        gstart = np.maximum.accumulate(np.where(grp, np.arange(len(grp)), 0))
+        keep = (np.arange(len(grp)) - gstart) < per_rec[s_typ]
+        s_idx, s_typ, pos, dfk = s_idx[keep], s_typ[keep], pos[keep], dfk[keep]
+        # per-S1 posting budget: rarest keys first, stop once ~budget target
+        # postings are covered (always keep the min_keys rarest) -> bounded time
+        o = np.lexsort((dfk, s_idx))
+        s_idx, s_typ, pos, dfk = s_idx[o], s_typ[o], pos[o], dfk[o]
+        first = np.r_[True, s_idx[1:] != s_idx[:-1]] if len(s_idx) else np.zeros(0, bool)
+        gstart = np.maximum.accumulate(np.where(first, np.arange(len(s_idx)), 0))
+        cum = np.cumsum(dfk)
+        before = cum - dfk - (cum[gstart] - dfk[gstart])
+        rank = np.arange(len(s_idx)) - gstart
+        keep = (rank < cfg.min_keys) | (before < cfg.posting_budget)
+        sk = pd.DataFrame({"i": s_idx[keep], "p": pos[keep], "c": s_typ[keep], "df": dfk[keep]})
+        del s_idx, s_typ, pos, dfk, o, grp, gstart, keep, first, cum, before, rank
         sk["w"] = weights[sk["c"].to_numpy()] * np.log1p(n_t / sk["df"].to_numpy())
         sk["g"] = group[sk["c"].to_numpy()]
 
@@ -206,22 +240,26 @@ def generate_candidates(s1: pd.DataFrame, tgt: pd.DataFrame, cfg: BlockConfig,
             w = ch["w"].to_numpy()[rep]
             g = ch["g"].to_numpy()[rep]
             pair = ss.astype(np.int64) * (n_t + 1) + tt
-            up, pinv = np.unique(pair, return_inverse=True)
-            score = np.bincount(pinv, weights=w)
-            sname = np.bincount(pinv, weights=w * (g == 0))
-            saddr = np.bincount(pinv, weights=w * (g == 1))
-            nkeys = np.bincount(pinv)
+            o = np.argsort(pair, kind="quicksort")
+            pair_s = pair[o]
+            brk = np.flatnonzero(np.r_[True, pair_s[1:] != pair_s[:-1]])
+            up = pair_s[brk]
+            wo, go = w[o], g[o]
+            score = np.add.reduceat(wo, brk)
+            sname = np.add.reduceat(wo * (go == 0), brk)
+            saddr = score - sname
+            nkeys = np.diff(np.r_[brk, len(pair_s)])
+            del o, pair_s, wo, go, pair, ss, tt, w, g, rep, offs
             ps = up // (n_t + 1)
             pt = up % (n_t + 1)
             # forward, adaptive K: rank < k_min OR (rank < k_max AND score >= ratio*top1)
-            rank = _rank_in_group(ps, score)
-            top1 = _group_max(ps, score)
+            rank, top1 = _rank_top1(ps, score)
             fwd = (rank < cfg.k_min) | ((rank < cfg.top_k) & (score >= cfg.adapt_ratio * top1))
-            m = (fwd | _topk_mask(ps, sname, cfg.top_k_name)
-                 | _topk_mask(ps, saddr, cfg.top_k_addr))
+            m = (fwd | (_rank_top1(ps, sname)[0] < cfg.top_k_name)
+                 | (_rank_top1(ps, saddr)[0] < cfg.top_k_addr))
             # reverse direction (target -> S1): chunk-local top-R is a superset
             # of the global top-R, merged and re-pruned below
-            rev = _topk_mask(pt, score, cfg.reverse_k) if cfg.reverse_k else np.zeros(len(ps), bool)
+            rev = (_rank_top1(pt, score)[0] < cfg.reverse_k) if cfg.reverse_k else np.zeros(len(ps), bool)
             keep = m | rev
             frame = pd.DataFrame({
                 "s_row": s_rows[ps[keep]].astype(np.int32), "t_row": t_rows[pt[keep]].astype(np.int32),
@@ -246,21 +284,25 @@ def generate_candidates(s1: pd.DataFrame, tgt: pd.DataFrame, cfg: BlockConfig,
     return res.reset_index(drop=True)
 
 
-def _rank_in_group(g, v):
-    order = np.lexsort((-v, g))
-    gs = g[order]
-    first = np.r_[True, gs[1:] != gs[:-1]] if len(gs) else np.zeros(0, bool)
-    start = np.maximum.accumulate(np.where(first, np.arange(len(gs)), 0))
-    rank = np.empty(len(g), np.int64)
-    rank[order] = np.arange(len(gs)) - start
-    return rank
-
-
-def _group_max(g, v):
-    _, inv = np.unique(g, return_inverse=True)
-    mx = np.full(inv.max() + 1 if len(inv) else 0, -np.inf)
-    np.maximum.at(mx, inv, v)
-    return mx[inv]
+def _rank_top1(g, v):
+    """Rank of each row within its group g by descending v, and the group max.
+    One float argsort on a composite key (much faster than lexsort)."""
+    n = len(v)
+    if n == 0:
+        return np.zeros(0, np.int64), np.zeros(0)
+    v = np.asarray(v, np.float64)
+    vmax = float(v.max()) + 1.0
+    scale = 2.0 ** np.ceil(np.log2(vmax + 1.0))
+    comp = g.astype(np.float64) * scale + (vmax - v)
+    o = np.argsort(comp, kind="quicksort")
+    gs = g[o]
+    first = np.r_[True, gs[1:] != gs[:-1]]
+    start = np.maximum.accumulate(np.where(first, np.arange(n), 0))
+    rank = np.empty(n, np.int64)
+    rank[o] = np.arange(n) - start
+    top = np.empty(n)
+    top[o] = v[o][start]
+    return rank, top
 
 
 def _prune_reverse(df, k):
