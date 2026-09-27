@@ -128,7 +128,12 @@ with open("run_log.txt", "w") as logf:
         print(line, end="")  # every line: progress is always visible
     proc.wait()
 print("exit code:", proc.returncode)
-assert proc.returncode == 0, "run failed - see run_log.txt\""""))
+if proc.returncode != 0:
+    tail = open("run_log.txt").read().splitlines()[-40:]
+    print("\\n==== LAST 40 LOG LINES ====\\n" + "\\n".join(tail))
+    reason = ("killed by the out-of-memory killer -> lower TRAIN_S1_SAMPLE (e.g. 60_000)"
+              if proc.returncode in (-9, 137) or any("exit code -9" in l for l in tail) else "see the log lines above")
+    raise RuntimeError(f"run failed (exit code {proc.returncode}): {reason}")"""))
 
 cells.append(md("## 6 · Results"))
 cells.append(code("""import json
