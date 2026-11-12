@@ -1,0 +1,151 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>System Flow</title>
+<style>
+:root{--navy:#0B3954;--teal:#087E8B;--green:#E3F4E8;--amber:#FFF4D6;--red:#FBE3E3;--blue:#E8F1F2;--line:#0B3954}
+*{box-sizing:border-box}
+body{margin:0;background:#fff;font:14px/1.35 Helvetica,Arial,sans-serif;color:#1b1b1b;width:1500px;padding:28px 36px}
+h1{color:var(--navy);margin:0 0 4px;font-size:28px}
+.sub{color:var(--teal);margin:0 0 18px;font-size:15px}
+.legend{display:flex;gap:18px;margin:0 0 18px;font-size:13px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:16px;height:12px;border:1px solid var(--teal);display:inline-block}
+.phase{border:2px dashed #9FB6BD;border-radius:12px;padding:14px 14px 10px;margin:0 0 10px;position:relative}
+.phase>.ptitle{position:absolute;top:-11px;left:14px;background:#fff;padding:0 8px;color:var(--teal);font-weight:bold;font-size:13px;letter-spacing:.5px}
+.row{display:flex;gap:14px;align-items:stretch}
+.card{flex:1;border:1.5px solid var(--teal);border-radius:9px;padding:9px 11px;background:var(--green);min-width:0}
+.card.amber{background:var(--amber)} .card.red{background:var(--red)} .card.blue{background:var(--blue)}
+.card h3{margin:0 0 4px;font-size:15px;color:var(--navy)}
+.model{display:inline-block;background:var(--navy);color:#fff;border-radius:5px;padding:2px 7px;font-size:12.5px;font-weight:bold;margin:2px 0 5px}
+.io{font-size:12.5px;margin:2px 0}
+.io b{color:var(--teal)}
+.arrow{text-align:center;font-size:22px;color:var(--line);line-height:1;margin:2px 0 6px}
+.harrow{display:flex;align-items:center;font-size:22px;color:var(--line)}
+.side{display:flex;gap:14px}
+.memory{display:flex;gap:14px;margin-top:12px}
+.mem{flex:1;border-radius:9px;padding:9px 11px;background:#0B3954;color:#fff;font-size:13px}
+.mem b{color:#9FE3EA}
+.rule{margin-top:12px;border:1.5px solid var(--teal);background:var(--blue);border-radius:9px;padding:10px 14px;font-size:14px}
+.small{font-size:12px;color:#555}
+</style></head><body>
+<h1>Full System Flow - Long-Context Underwater Video Understanding</h1>
+<p class="sub">Tracking objects and identifying temporal patterns across long underwater video - which model does which job</p>
+<div class="legend">
+  <span><i class="sw" style="background:var(--green)"></i>Ready-made tool / model</span>
+  <span><i class="sw" style="background:var(--amber)"></i>Existing model, used in our own way</span>
+  <span><i class="sw" style="background:var(--red)"></i>Our own research part</span>
+  <span><i class="sw" style="background:var(--blue)"></i>Offline / training (not in the live loop)</span>
+</div>
+
+<div class="phase"><div class="ptitle">0. BEFORE RUNNING - TRAINING &amp; LABELLING (offline, once)</div>
+<div class="row">
+  <div class="card blue"><h3>A. Label data fast</h3><span class="model">SAM 2.1 / SAM 3</span>
+    <div class="io"><b>In:</b> raw underwater videos</div><div class="io"><b>Out:</b> boxes, masks, IDs (a person fixes mistakes)</div></div>
+  <div class="card blue"><h3>B. Train the detector</h3><span class="model">YOLO26 / YOLO11 (Ultralytics)</span>
+    <div class="io"><b>In:</b> SFISHTRACK, MFT25, BrackishMOT, FishTrack23</div><div class="io"><b>Out:</b> underwater fish detector weights</div></div>
+  <div class="card blue"><h3>C. Prepare re-ID network</h3><span class="model">V-JEPA 2.1 (ViT-L) or small ReID CNN</span>
+    <div class="io"><b>In:</b> fish crops with track IDs</div><div class="io"><b>Out:</b> appearance embedding model</div></div>
+</div></div>
+<div class="arrow">&#9660;</div>
+
+<div class="phase"><div class="ptitle">1. INPUT &amp; PREPARATION (CPU)</div>
+<div class="row">
+  <div class="card"><h3>1. Video input &amp; decoding</h3><span class="model">FFmpeg / PyAV</span>
+    <div class="io"><b>In:</b> long MP4 or live camera / ROV stream</div>
+    <div class="io"><b>Out:</b> every frame + frame number + exact timestamp</div>
+    <div class="io small">Grouped into 10 s clips = work units only (saving, checkpoints). Nothing resets at a clip boundary.</div></div>
+  <div class="harrow">&#9654;</div>
+  <div class="card"><h3>2. Water-quality check</h3><span class="model">OpenCV (no AI model)</span>
+    <div class="io"><b>In:</b> each frame</div>
+    <div class="io"><b>Out:</b> visibility score (contrast, sharpness, colour)</div>
+    <div class="io small">Used later to ignore alerts in bad visibility. Image enhancement only if tests show it helps.</div></div>
+</div></div>
+<div class="arrow">&#9660;</div>
+
+<div class="phase"><div class="ptitle">2. SEE &amp; FOLLOW (GPU, every frame, in order)</div>
+<div class="row">
+  <div class="card"><h3>3. Detection</h3><span class="model">YOLO (fine-tuned)</span>
+    <div class="io"><b>In:</b> frames in batches of 8-16</div>
+    <div class="io"><b>Out:</b> boxes, class (fish, turtle, crab, debris...), confidence</div></div>
+  <div class="harrow">&#9654;</div>
+  <div class="card"><h3>4. Short-term tracking</h3><span class="model">BoT-SORT</span>
+    <div class="io"><b>In:</b> boxes, frame by frame</div>
+    <div class="io"><b>Out:</b> track IDs + track pieces (tracklets)</div>
+    <div class="io small">Keeps IDs for seconds. Corrects camera motion (ROV/AUV).</div></div>
+  <div class="harrow">&#9654;</div>
+  <div class="card amber"><h3>5. Hard moments only</h3><span class="model">SAM 2.1 tiny/small</span>
+    <div class="io"><b>When:</b> fish cross, overlap, half hidden, or ID is 'uncertain'</div>
+    <div class="io"><b>In:</b> boxes just before the problem</div>
+    <div class="io"><b>Out:</b> exact masks through the hard moment &rarr; fewer ID swaps</div></div>
+</div></div>
+<div class="arrow">&#9660;</div>
+
+<div class="phase"><div class="ptitle">3. REMEMBER WHO IS WHO (long-term identity)</div>
+<div class="row">
+  <div class="card amber"><h3>6. Appearance fingerprint</h3><span class="model">SAM 2 mask + V-JEPA 2.1 / ReID CNN</span>
+    <div class="io"><b>In:</b> fish crop, background removed by mask</div>
+    <div class="io"><b>Out:</b> embedding vector per track piece</div></div>
+  <div class="harrow">&#9654;</div>
+  <div class="card red"><h3>7. Self-taught identity (STIM)</h3><span class="model">Our contrastive head (PyTorch)</span>
+    <div class="io"><b>In:</b> track pieces of THIS video</div>
+    <div class="io"><b>Learns:</b> same piece = same fish, same frame = different fish</div>
+    <div class="io"><b>Out:</b> embeddings tuned to these exact fish</div></div>
+  <div class="harrow">&#9654;</div>
+  <div class="card red"><h3>8. Identity memory</h3><span class="model">Our linker (Hungarian + margin rule)</span>
+    <div class="io"><b>In:</b> embeddings + position + time gap</div>
+    <div class="io"><b>Out:</b> global IDs marked <b>confirmed / probable / uncertain</b></div>
+    <div class="io small">Re-links fish after hiding. Refuses to guess when two fish look the same.</div></div>
+</div></div>
+<div class="arrow">&#9660;</div>
+
+<div class="phase"><div class="ptitle">4. UNDERSTAND TIME - EVENTS, PATTERNS, ALERTS (CPU, from the database)</div>
+<div class="row">
+  <div class="card"><h3>9. Events</h3><span class="model">Python rules</span>
+    <div class="io"><b>Out:</b> arrived, left, came back, group formed, visibility dropped - with timestamps</div></div>
+  <div class="harrow">&#9654;</div>
+  <div class="card red"><h3>10. Temporal patterns</h3><span class="model">pandas, SciPy (FFT), ruptures, HDBSCAN + DTW</span>
+    <div class="io"><b>Out:</b> cycles, trends, change points, typical routes, recurring visits, event sequences</div>
+    <div class="io small">Reported as ranges when IDs are uncertain ("3-5 revisits").</div></div>
+  <div class="harrow">&#9654;</div>
+  <div class="card red"><h3>11. Health-gated alerts</h3><span class="model">Robust statistics</span>
+    <div class="io"><b>Out:</b> unusual crowding, emptiness, odd movement, unknown objects</div>
+    <div class="io small">Ignored if visibility is bad or the tracker is breaking.</div></div>
+</div></div>
+<div class="arrow">&#9660;</div>
+
+<div class="phase"><div class="ptitle">5. DESCRIBE IN WORDS (GPU, separate worker, only important frames)</div>
+<div class="row">
+  <div class="card amber"><h3>12. Keyframe picker</h3><span class="model">Event triggers + duplicate filter</span>
+    <div class="io"><b>In:</b> events, patterns, alerts + 1 frame per 30-60 s</div>
+    <div class="io"><b>Out:</b> a few sharp, non-repeating keyframes</div></div>
+  <div class="harrow">&#9654;</div>
+  <div class="card amber"><h3>13. Vision-language model</h3><span class="model">Qwen3-VL 4B / 8B (quantised)</span>
+    <div class="io"><b>In:</b> keyframes with IDs drawn + tracker facts</div>
+    <div class="io"><b>Out:</b> what is happening, in plain words</div>
+    <div class="io small">Any text naming an ID the tracker never saw is rejected.</div></div>
+  <div class="harrow">&#9654;</div>
+  <div class="card amber"><h3>14. Summaries in levels</h3><span class="model">Qwen3-VL (text)</span>
+    <div class="io"><b>Out:</b> clip &rarr; 10-minute &rarr; whole-video summaries</div></div>
+</div></div>
+<div class="arrow">&#9660;</div>
+
+<div class="phase"><div class="ptitle">6. OUTPUT</div>
+<div class="row">
+  <div class="card"><h3>15. Database &amp; search</h3><span class="model">SQLite + FAISS</span>
+    <div class="io"><b>Holds:</b> tracks, IDs, events, patterns, summaries</div>
+    <div class="io"><b>Search:</b> by ID, time, event or plain text</div></div>
+  <div class="harrow">&#9654;</div>
+  <div class="card"><h3>16. Annotated video</h3><span class="model">OpenCV + FFmpeg</span>
+    <div class="io"><b>In:</b> ORIGINAL video re-read + final global IDs</div>
+    <div class="io"><b>Out:</b> same length, same frames, boxes + IDs</div></div>
+  <div class="harrow">&#9654;</div>
+  <div class="card"><h3>17. Dashboard</h3><span class="model">FastAPI + Streamlit</span>
+    <div class="io"><b>Shows:</b> video player, timeline, patterns, summaries, alerts, ID search</div></div>
+</div></div>
+
+<div class="memory">
+  <div class="mem"><b>Memory A - short-term</b><br>Live tracks, speed, recent appearance. In RAM. Steps 4-5.</div>
+  <div class="mem"><b>Memory B - objects &amp; events</b><br>Global IDs, paths, first/last seen, events. SQLite. Steps 8-11.</div>
+  <div class="mem"><b>Memory C - meaning</b><br>Descriptions, summaries, search vectors. SQLite + FAISS. Steps 13-15.</div>
+</div>
+<div class="rule"><b>Simple rule:</b> YOLO <b>finds</b> &rarr; BoT-SORT <b>follows</b> &rarr; SAM 2 <b>fixes hard moments</b> &rarr; STIM + identity memory <b>remember who is who</b> &rarr; statistics <b>find patterns</b> &rarr; Qwen3-VL <b>explains in words</b>.</div>
+</body></html>
