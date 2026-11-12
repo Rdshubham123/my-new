@@ -96,7 +96,7 @@ def diagram():
     arrow(d, 113, 292, 128, 292); arrow(d, 236, 292, 251, 292); arrow(d, 359, 292, 374, 292)
     # row 2
     node(d, 374, 190, w, h, "5 Self-taught ReID", "learns THESE fish|from the video itself", RED)
-    node(d, 251, 190, w, h, "6 Event + alert", "arrive / leave / crowd|ignore bad visibility", AMBER)
+    node(d, 251, 190, w, h, "6 Events + patterns", "cycles, trends, change points|alerts if visibility is good", AMBER)
     node(d, 128, 190, w, h, "7 Keyframe picker", "only important frames|no duplicates", AMBER)
     node(d, 5, 190, w, h, "8 VLM (Qwen3-VL)", "describes what happens|only confirmed IDs", AMBER)
     arrow(d, 428, 270, 428, 234); arrow(d, 400, 234, 400, 270)
@@ -133,16 +133,21 @@ def on_page(c, doc):
 story = []
 # ---------- cover ----------
 story += [Spacer(1, 45 * mm),
-          P("Long-Context Underwater Video Understanding and Object Tracking", TITLE),
+          P("Long-Context Underwater Video Understanding", TITLE),
           Spacer(1, 6 * mm),
-          P("Project plan: the problem, what we are building, what already exists,<br/>and what we must solve to make it our own", SUB),
+          P("Tracking objects and identifying temporal patterns across long underwater video sequences<br/><br/>Project plan: the problem, our approach, what already exists, and what we must solve to make it our own", SUB),
           Spacer(1, 25 * mm),
-          box("<b>One-line idea:</b> break long underwater videos into manageable pieces of work, "
-              "<b>without breaking</b> the memory of what happened or which fish is which.", LIGHT),
+          box("<b>Official problem statement</b><br/><br/>"
+              "<i>\"Long-context underwater video understanding - tracking objects and identifying temporal patterns "
+              "across long underwater video sequences.\"</i>", GREEN, TEAL),
+          Spacer(1, 6 * mm),
+          box("<b>Our approach in one line:</b> break long underwater videos into manageable pieces of work, "
+              "<b>without breaking</b> the memory of what happened, which object is which, or the patterns that build up over time.", LIGHT),
           Spacer(1, 10 * mm),
           box("<b>How to read the labels in this document</b><br/>"
               "<b>[Verified]</b> - checked by web search in November 2026 (link given). Still confirm licence and numbers on the official page.<br/>"
               "<b>[Not re-checked]</b> - well-known tool, but not re-verified for this document.<br/>"
+              "<b>[Established]</b> - standard, well-known technique. <b>[Needs adapting]</b> - exists but must be changed for underwater use.<br/>"
               "<b>[Our idea]</b> - a proposal that has not been tested yet.", AMBER, colors.HexColor("#C9A227")),
           Spacer(1, 30 * mm),
           P("Date: 12 November 2026", ParagraphStyle("c", parent=B, alignment=TA_CENTER)),
@@ -150,7 +155,8 @@ story += [Spacer(1, 45 * mm),
 
 # ---------- contents ----------
 story += [P("Contents", H1)]
-for i, t in enumerate(["The problem", "What we are building", "System design (diagram)",
+for i, t in enumerate(["The problem statement and what it asks for", "Our approach: what we are building",
+                       "System design (diagram)", "Temporal patterns: the second half of the problem",
                        "What is available on the internet right now", "What we can build today",
                        "Problems we must solve (this makes it ours)", "Our new merged approach",
                        "How we prove it works", "Build plan, step by step", "Hardware and costs",
@@ -159,25 +165,44 @@ for i, t in enumerate(["The problem", "What we are building", "System design (di
 story.append(PageBreak())
 
 # ---------- 1 problem ----------
-story += [P("1. The problem", H1),
-          P("Underwater cameras (fixed cameras, ROVs, AUVs) record for hours. Today most AI systems look at one frame "
-            "or a short clip at a time. That causes real failures:"),
-          *bullets(["A fish hides behind coral or in murky water and comes back with a <b>new ID</b>, so one fish is counted many times.",
-                    "When a long video is cut into clips, every clip <b>forgets</b> the previous one.",
-                    "Many fish of the same species <b>look almost identical</b>, so it is easy to swap their identities.",
-                    "Water quality changes all the time: green/blue colour, low contrast, floating particles, poor light, motion blur.",
-                    "There is no easy way to ask <i>\"what happened in this 3-hour video?\"</i> or <i>\"when did the fish gather?\"</i>.",
-                    "Simple alert systems cannot tell a <b>real unusual event</b> from a <b>tracking mistake</b> or bad visibility."]),
-          P("Why it matters", H2),
-          P("Marine biologists, fish farms and inspection teams need correct counts, movement histories and searchable archives. "
-            "Watching hours of footage by hand does not scale."),
-          P("The core research question", H2),
-          box("<b>How can we keep context and object identities across a long underwater video, "
-              "while still processing it efficiently in smaller pieces?</b>"),
+story += [P("1. The problem statement and what it asks for", H1),
+          P("Official problem statement", H2),
+          box("<i>\"Long-context underwater video understanding - tracking objects and identifying temporal patterns "
+              "across long underwater video sequences.\"</i>", GREEN, TEAL),
+          Spacer(1, 6),
+          P("Breaking the statement into parts", H2),
+          table([["Part of the statement", "What it means", "What the system must deliver"],
+                 ["<b>Long-context</b>", "Videos last hours, not seconds. The system must remember what happened earlier.",
+                  "Memory that survives the whole video; no reset when the video is split for processing."],
+                 ["<b>Underwater</b>", "Colour loss, low contrast, particles, poor light, occlusion by coral and rocks.",
+                  "Models that work on murky footage, and that know when visibility is too bad to trust."],
+                 ["<b>Video understanding</b>", "Not just boxes: what is happening and why it matters.",
+                  "Events, summaries and searchable descriptions."],
+                 ["<b>Tracking objects</b>", "Follow each fish, animal or object through time.",
+                  "Detection + IDs that stay the same over time, including after it hides and comes back."],
+                 ["<b>Identifying temporal patterns</b>", "Find what repeats, what changes and what is unusual over time.",
+                  "Cycles, trends, recurring visits, typical movement routes, change points and anomalies (section 4)."]],
+                [38, 62, 70]),
+          P("Why this is hard today", H2),
+          *bullets(["Most AI systems look at one frame or a short clip at a time, so they <b>forget</b> what came before.",
+                    "A fish hides behind coral or in murky water and comes back with a <b>new ID</b>, so it is counted many times.",
+                    "Many fish of the same species <b>look almost identical</b>, so identities get swapped.",
+                    "Patterns only appear over <b>long time spans</b>, but long videos are too big to feed to a model at once.",
+                    "Wrong IDs create <b>fake patterns</b> (a fish 'visiting' ten times is really ten tracking breaks).",
+                    "Simple alerts cannot tell a <b>real unusual event</b> from a <b>tracking mistake</b> or bad visibility."]),
+          P("Who needs it", H2),
+          P("Marine biologists, fish farms and underwater inspection teams need correct counts, movement histories, "
+            "behaviour patterns and searchable archives. Watching hours of footage by hand does not scale."),
+          P("Our research question (derived from the statement)", H2),
+          box("<b>How can we track objects and find temporal patterns across a long underwater video, "
+              "while still processing it efficiently in smaller pieces - without losing context or identity?</b>"),
+          Spacer(1, 6),
+          P("Note: the problem statement does not say <i>how</i> to solve it. Splitting the video into clips, three-level memory "
+            "and using a vision-language model are <b>our approach</b>, described from section 2 onwards.", NOTE),
           PageBreak()]
 
 # ---------- 2 what we build ----------
-story += [P("2. What we are building", H1),
+story += [P("2. Our approach: what we are building", H1),
           P("You upload a long underwater video (or connect a camera). The system returns:"),
           table([["#", "Output", "What it means for the user"],
                  ["1", "Annotated video", "The same video, same length and frame rate, with a box and ID on every animal or object."],
@@ -201,6 +226,15 @@ story += [P("2. What we are building", H1),
               "The tracker and the memory run continuously and <b>never restart at a clip boundary</b>. "
               "Sending frames as network \"packets\" is not needed on one machine; in-memory batches with a frame number and timestamp are enough.",
               GREEN, TEAL),
+          Spacer(1, 6),
+          P("How our approach covers the problem statement", H2),
+          table([["Statement asks for", "Our approach", "Section"],
+                 ["Long-context", "Continuous tracker + three-level memory; clips are only work units", "2, 3"],
+                 ["Tracking objects", "YOLO + BoT-SORT + identity memory + self-taught re-ID (STIM)", "3, 8"],
+                 ["Identifying temporal patterns", "Time series from tracks, cycles, change points, route clustering, revisits", "4"],
+                 ["Video understanding", "Keyframes + VLM summaries grounded in tracker facts", "3"],
+                 ["Underwater conditions", "Fine-tuning on underwater data, visibility score, health-gated alerts", "7"]],
+                [45, 105, 20]),
           PageBreak()]
 
 # ---------- 3 diagram ----------
@@ -215,7 +249,44 @@ story += [P("3. System design", H1), diagram(),
           PageBreak()]
 
 # ---------- 4 available ----------
-story += [P("4. What is available on the internet right now", H1),
+# ---------- 4 temporal patterns ----------
+story += [P("4. Temporal patterns: the second half of the problem", H1),
+          P("Tracking tells us <i>where each object is</i>. Temporal patterns tell us <i>what keeps happening over time</i>. "
+            "The problem statement asks for both. Patterns are found from the <b>stored track and event data</b> (memory B), "
+            "not by re-watching the video, so they are cheap to compute even for very long recordings."),
+          P("Kinds of patterns we look for", H2),
+          table([["Pattern", "Underwater example", "Needs reliable IDs?"],
+                 ["Cycles (periodic)", "Fish activity rises at dawn and dusk; activity follows the tide", "No - counts are enough"],
+                 ["Trends", "Number of fish slowly falls over a week", "No"],
+                 ["Change points", "Sudden switch from calm to very active; visibility collapse", "No"],
+                 ["Typical routes", "Fish often patrol the reef edge, or swim through the same gap", "Partly - short tracks are enough"],
+                 ["Recurring visits", "The same turtle comes back every ~40 minutes", "<b>Yes</b> - needs identity across gaps"],
+                 ["Event sequences", "A predator appears, then the school tightens, then disperses", "Partly"],
+                 ["Anomalies", "Unusual crowding, unknown object, sudden emptiness", "No, but must check tracker health"]],
+                [35, 90, 45]),
+          P("How we find them", H2),
+          table([["Step", "Method", "Status"],
+                 ["1. Turn tracks into time series", "Per minute: count per class, mean speed, spread of the group, time in each zone, arrivals/departures", "[Established]"],
+                 ["2. Cycles", "Autocorrelation, Fourier transform, Lomb-Scargle (works with gaps in the data)", "[Established]"],
+                 ["3. Change points", "PELT / binary segmentation, e.g. the ruptures Python library", "[Established, library not re-checked]"],
+                 ["4. Typical routes", "Cluster trajectories (dynamic time warping + HDBSCAN) per camera zone", "[Established, needs adapting]"],
+                 ["5. Recurring visits", "Revisit intervals per global ID from the identity memory", "[Our idea] - uses only confirmed/probable IDs"],
+                 ["6. Event sequences", "Count which events usually follow which (simple sequence mining)", "[Established]"],
+                 ["7. Anomalies", "Deviation from the learned normal pattern, ignored when visibility or tracker health is bad", "[Our idea]"],
+                 ["8. Describe in words", "VLM turns detected patterns + keyframes into plain-language explanations", "[Needs adapting]"]],
+                [42, 88, 40]),
+          P("What is new here [Our idea]", H2),
+          *bullets(["<b>Uncertainty-aware patterns:</b> because our identity memory marks links as confirmed / probable / uncertain, "
+                    "pattern statistics can be reported as a range (e.g. '3 to 5 revisits') instead of one possibly wrong number.",
+                    "<b>Patterns separated from tracking errors:</b> a 'pattern' that matches a burst of new IDs or a visibility drop "
+                    "is flagged as a likely tracking artefact.",
+                    "<b>The VLM explains, it does not discover:</b> statistics find the pattern; the VLM describes it. This avoids invented patterns."]),
+          box("<b>Data gap:</b> daily or tidal cycles need recordings of many hours or days from a fixed camera. Public tracking "
+              "datasets are short, so we need long recordings (our own or open archives) and we can test methods by "
+              "<b>planting known patterns</b> into real data.", RED, colors.HexColor("#C0392B")),
+          PageBreak()]
+
+story += [P("5. What is available on the internet right now", H1),
           P("Models and tools", H2),
           table([["Job", "Tool", "Status / notes", "Link"],
                  ["Read / write video", "FFmpeg, PyAV, OpenCV", "Free, open source. [Not re-checked]", "ffmpeg.org"],
@@ -252,7 +323,7 @@ story += [P("4. What is available on the internet right now", H1),
           PageBreak()]
 
 # ---------- 5 buildable today ----------
-story += [P("5. What we can build today", H1),
+story += [P("6. What we can build today", H1),
           P("Using only the tools above, without new research, we can build a working system:"),
           table([["Part", "Built with", "Status"],
                  ["Video reading with exact timestamps", "PyAV / FFmpeg", "Ready"],
@@ -268,17 +339,17 @@ story += [P("5. What we can build today", H1),
                 [62, 60, 48], row_bg=[GREEN] * 10),
           Spacer(1, 8),
           box("This alone is a <b>useful product</b>, but it is mostly <b>engineering</b> - joining existing tools. "
-              "To make it a research project that is truly ours, we must solve the problems in the next section."),
+              "To make it a research project that is truly ours, we must solve the problems in section 7."),
           PageBreak()]
 
 # ---------- 6 problems to solve ----------
-story += [P("6. Problems we must solve (this makes it ours)", H1),
+story += [P("7. Problems we must solve (this makes it ours)", H1),
           P("These are the parts that nobody has fully solved for long underwater video. Solving even one of them well is the "
             "project's own contribution."),
           table([["#", "Problem", "Why existing tools fail", "Our direction"],
                  ["P1", "<b>Recognise the same fish after minutes away</b>, even when others look identical",
                   "Trackers remember for seconds. Normal ReID learns 'species', not 'this fish'.",
-                  "Self-taught identity learning from the video itself + global linking + 'uncertain' when not sure (section 7)."],
+                  "Self-taught identity learning from the video itself + global linking + 'uncertain' when not sure (section 8)."],
                  ["P2", "<b>Know when NOT to guess</b>",
                   "Most trackers always pick a match, so mistakes look like facts.",
                   "Link only when the best match is clearly better than the second best. Report the 'uncertain' rate."],
@@ -297,14 +368,17 @@ story += [P("6. Problems we must solve (this makes it ours)", H1),
                  ["P7", "<b>Underwater image quality</b>",
                   "Enhancement looks nicer to people but may not help the detector.",
                   "Do not enhance by default; test raw vs enhanced. Use a visibility score instead."],
-                 ["P8", "<b>No long-gap test data</b>",
+                 ["P8", "<b>Temporal patterns from noisy, uncertain tracks</b>",
+                  "Pattern statistics (revisits, cycles) silently assume every ID is correct; one ID swap creates fake patterns.",
+                  "Uncertainty-aware pattern mining: carry the 'uncertain' links into the statistics and report ranges (section 4)."],
+                 ["P9", "<b>No long-gap test data</b>",
                   "Public datasets are short or have no identities across long gaps.",
                   "Create a small labelled test set (20-40 fish, 3-5 long videos) and a new scoring method."]],
                 [9, 42, 55, 64]),
           PageBreak()]
 
 # ---------- 7 merged approach ----------
-story += [P("7. Our new merged approach  [Our idea]", H1),
+story += [P("8. Our new merged approach  [Our idea]", H1),
           P("Working name: <b>Self-Taught Identity Memory (STIM)</b>. It combines four ideas that exist separately on the internet "
             "into one system for long underwater video. As far as our searches went, we did not find this combination published, "
             "but a full literature search is still needed before claiming it is new."),
@@ -334,7 +408,7 @@ story += [P("7. Our new merged approach  [Our idea]", H1),
           PageBreak()]
 
 # ---------- 8 proof ----------
-story += [P("8. How we prove it works", H1),
+story += [P("9. How we prove it works", H1),
           table([["Experiment", "What it does", "What it shows"],
                  ["A - Normal tracking", "One tracker over the whole video", "Baseline without long-term memory"],
                  ["B - Independent clips", "Cut into clips, IDs reset each clip", "What breaks when you cut naively"],
@@ -354,6 +428,7 @@ story += [P("8. How we prove it works", H1),
                  ["Tracking", "HOTA, IDF1, ID switches, fragmentation"],
                  ["Long-gap re-ID (new)", "Correct links, wrong links, 'uncertain' rate, identity purity, accuracy vs gap length"],
                  ["Understanding", "Event time error, event precision/recall, invented-ID rate in VLM text"],
+                 ["Temporal patterns (new)", "Change points found within +/- tolerance (F1), planted periodic patterns recovered, revisit-interval error, correct pattern descriptions"],
                  ["Alerts", "Precision, recall, false alarms per hour, share of alerts caused by tracker errors"],
                  ["Speed", "Frames per second, delay, peak GPU memory, VLM calls per hour"]],
                 [40, 130]),
@@ -366,14 +441,14 @@ story += [P("8. How we prove it works", H1),
           PageBreak()]
 
 # ---------- 9 build plan ----------
-story += [P("9. Build plan, step by step", H1),
+story += [P("10. Build plan, step by step", H1),
           table([["Phase", "Goal", "Main tools", "Done when"],
                  ["1 Detect", "Fine-tune detector, run on video", "Ultralytics YOLO, SFISHTRACK", "mAP measured on held-out videos"],
                  ["2 Track", "Continuous IDs, annotated video", "BoT-SORT, run_tracking.py", "Output video same length and frame count; IDs do not reset at clip edges"],
                  ["3 Memory", "Re-link IDs, store everything", "identity.py, SQLite", "Planted-gap test works; 'uncertain' cases logged"],
                  ["4 STIM", "Self-taught identity learning", "PyTorch, V-JEPA 2.1 or CNN", "Better long-gap link accuracy than phase 3"],
                  ["5 VLM", "Keyframes, summaries in levels", "Qwen3-VL 4B/8B quantised", "Event times match a hand-made list; zero invented IDs"],
-                 ["6 Alerts", "Health-gated anomaly alerts", "Python statistics", "Measured precision / false alarms"],
+                 ["6 Patterns", "Temporal patterns + health-gated alerts", "pandas, SciPy, ruptures, HDBSCAN", "Planted patterns found; measured false alarms"],
                  ["7 App", "Upload, play, search, timeline", "FastAPI, Streamlit, FAISS", "End-to-end demo on a long video"],
                  ["8 Paper", "Experiments A-D, write-up", "TrackEval, own long-gap metric", "Results tables and figures"]],
                 [20, 45, 50, 55]),
@@ -389,7 +464,7 @@ story += [P("9. Build plan, step by step", H1),
           PageBreak()]
 
 # ---------- 10 hardware ----------
-story += [P("10. Hardware and costs", H1),
+story += [P("11. Hardware and costs", H1),
           P("Target: one NVIDIA GPU slice with about 20 GB of memory. The numbers below are <b>rough planning estimates</b> "
             "from model sizes, not measurements."),
           table([["Component", "Rough GPU memory", "Plan"],
@@ -407,7 +482,7 @@ story += [P("10. Hardware and costs", H1),
           PageBreak()]
 
 # ---------- 11 risks ----------
-story += [P("11. Risks and honest limits", H1),
+story += [P("12. Risks and honest limits", H1),
           table([["Risk", "How likely", "What we do about it"],
                  ["Identical schooling fish cannot be told apart after long gaps", "High", "Report 'uncertain' and counts; measure the 'uncertain' rate honestly"],
                  ["No ready long-gap test data", "Certain", "Label a small custom set with SAM 3 help in CVAT"],
@@ -446,7 +521,7 @@ src = [("Ultralytics YOLO26 docs", "https://docs.ultralytics.com/"),
        ("Zhang et al. 2008, network flow with occlusion model", "https://www.cvlibs.net/projects/autonomous_vision_survey/literature/Zhang2008CVPR.pdf"),
        ("GMCP-Tracker (ECCV 2012)", "https://vilab.epfl.ch/zamir/index_files/GMCP-Tracker_ECCV12.pdf"),
        ("CoNo-Link (arXiv 2312.08951)", "https://arxiv.org/html/2312.08951v1")]
-story += [P("12. Sources", H1),
+story += [P("13. Sources", H1),
           P("Checked by web search in November 2026. Licences and numbers should be confirmed on each official page before use.", NOTE)]
 for i, (t, u) in enumerate(src, 1):
     story.append(P(f"{i}. {t} - {link(u)}", SM))
