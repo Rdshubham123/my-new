@@ -91,7 +91,7 @@ def diagram():
     # row 1
     node(d, 5, 270, w, h, "1 Video input", "file / camera / ROV|keep every timestamp", GREEN)
     node(d, 128, 270, w, h, "2 Detector", "fine-tuned YOLO|boxes per frame", GREEN)
-    node(d, 251, 270, w, h, "3 Tracker", "BoT-SORT, never reset|short-term IDs", GREEN)
+    node(d, 251, 270, w, h, "3 Tracker", "BoT-SORT, never reset|+ SAM 2 for hard cases", GREEN)
     node(d, 374, 270, w, h, "4 Identity memory", "re-link after gaps|or say 'uncertain'", AMBER)
     arrow(d, 113, 292, 128, 292); arrow(d, 236, 292, 251, 292); arrow(d, 359, 292, 374, 292)
     # row 2
@@ -295,6 +295,8 @@ story += [P("5. What is available on the internet right now", H1),
                  ["Short-term tracking", "BoT-SORT, ByteTrack", "Built into Ultralytics. BoT-SORT handles camera motion (ROV). [Not re-checked]", "-"],
                  ["Fish-specific tracker", "SU-T", "[Verified] Unscented Kalman filter + fish-shaped IoU. 34.1 HOTA / 44.6 IDF1 on MFT25.", link("https://vranlee.github.io/SU-T/", "vranlee.github.io/SU-T")],
                  ["Schooling-fish tracker", "TIDE", "[Verified, partly] Only an aggregator listing found; read the paper first.", link("https://vranlee.github.io/TIDE", "vranlee.github.io/TIDE")],
+                 ["Mask tracking (video)", "SAM 2 / SAM 2.1 (Meta)", "[Verified] Click or box on one frame, it follows the object as a pixel mask through the video. Apache 2.0. Sizes from tiny (38.9M params) to large (224.4M).", link("https://github.com/facebookresearch/sam2", "github.com/facebookresearch/sam2")],
+                 ["Long-video mask tracking", "SAM2Long", "[Verified] ICCV 2025. Training-free memory tree on top of SAM 2; fewer drifting errors in long videos.", link("https://github.com/Mark12Ding/SAM2Long", "github.com/Mark12Ding/SAM2Long")],
                  ["Segment / track by text", "SAM 3 (Meta)", "[Verified] Text prompt like \"fish\" finds and tracks all fish. Heavy; use for labelling and hard cases.", link("https://github.com/facebookresearch/sam3", "github.com/facebookresearch/sam3")],
                  ["Video features", "V-JEPA 2 / 2.1 (Meta)", "[Verified] Self-supervised video encoder. 2.1 has dense features; small 80M/300M versions.", link("https://github.com/facebookresearch/vjepa2", "github.com/facebookresearch/vjepa2")],
                  ["Vision-language model", "Qwen3-VL (2B/4B/8B/32B + MoE)", "[Verified] Long context, timestamp alignment. Main choice for summaries.", link("https://github.com/QwenLM/Qwen3-VL", "github.com/QwenLM/Qwen3-VL")],
@@ -335,11 +337,46 @@ story += [P("6. What we can build today", H1),
                  ["Event rules and simple alerts", "Counts, speed, crowding per time window", "Ready"],
                  ["Summaries", "Qwen3-VL 4B/8B on chosen keyframes", "Ready"],
                  ["Text search", "FAISS over summaries", "Ready"],
-                 ["Dashboard", "FastAPI + Streamlit", "Ready"]],
-                [62, 60, 48], row_bg=[GREEN] * 10),
+                 ["Dashboard", "FastAPI + Streamlit", "Ready"],
+                 ["<b>NEW: Precise fish masks + fixing hard cases</b> (fish crossing, overlapping, half hidden)", "<b>SAM 2.1</b> (tiny/small), started from YOLO boxes", "Ready - run only when needed (see next page)"],
+                 ["<b>NEW: Clean fish crops for re-ID</b> (no coral or water background)", "<b>SAM 2.1</b> masks", "Ready"],
+                 ["<b>NEW: Fast labelling of test videos</b>", "<b>SAM 2.1</b>: draw one box, it follows the fish", "Ready"],
+                 ["<b>NEW: Following one important target for a long time</b> (turtle, ROV inspection object)", "<b>SAM2Long</b> (no training needed)", "Ready to test"]],
+                [62, 60, 48], row_bg=[GREEN] * 10 + [AMBER] * 4),
           Spacer(1, 8),
           box("This alone is a <b>useful product</b>, but it is mostly <b>engineering</b> - joining existing tools. "
               "To make it a research project that is truly ours, we must solve the problems in section 7."),
+          PageBreak(),
+          P("Where SAM 2 fits in our system", H2),
+          P("SAM 2 (Segment Anything Model 2, Meta) is a <b>mask tracker</b>: you mark an object once (click or box) and it follows "
+            "that object pixel by pixel through the video, using a memory of earlier frames. It is strong on general video benchmarks (we have not yet tested it on our underwater footage), but it "
+            "<b>does not find new objects by itself</b> and gets slower with every extra object it follows. So it is a "
+            "<b>helper</b> next to YOLO + BoT-SORT, not a replacement."),
+          table([["#", "Where we use SAM 2", "How", "Why it helps"],
+                 ["1", "<b>Hard tracking moments</b> - two fish cross, overlap or one is half hidden",
+                  "When BoT-SORT or the identity memory says 'uncertain', give SAM 2 the boxes from just before the problem and let it follow both fish through it",
+                  "Masks separate touching fish much better than boxes, so fewer ID swaps"],
+                 ["2", "<b>Clean crops for re-identification</b> (STIM)",
+                  "Cut the fish out with its mask before making the appearance embedding",
+                  "The embedding describes the fish, not the coral or water behind it - better matching after gaps"],
+                 ["3", "<b>Labelling our long-gap test set</b>",
+                  "Draw a box on one frame, SAM 2 follows the fish; a person only fixes mistakes",
+                  "Labelling becomes much faster; the missing test data (P9) becomes affordable"],
+                 ["4", "<b>One important target for a long time</b> - a turtle, a diver, an inspected pipe",
+                  "SAM2Long, which adds a memory tree to SAM 2 for long videos",
+                  "Keeps the target over long sequences with less drifting"],
+                 ["5", "<b>Better measurements for temporal patterns</b>",
+                  "Use mask area and shape instead of boxes",
+                  "More accurate fish size, group density and zone occupancy over time"]],
+                [7, 42, 66, 55]),
+          Spacer(1, 6),
+          P("Where we should NOT use SAM 2", H2),
+          *bullets(["As the <b>main tracker for many fish on every frame</b> - it is too slow and memory grows with each object.",
+                    "To <b>find new fish</b> - it needs a prompt; YOLO (or SAM 3 with a text prompt like 'fish') must find them first.",
+                    "To <b>recognise a fish that left the view and came back minutes later</b> - that is the job of the identity memory and STIM."]),
+          Spacer(1, 4),
+          box("<b>Simple rule:</b> YOLO finds, BoT-SORT follows, <b>SAM 2 fixes the hard moments and draws precise outlines</b>, "
+              "the identity memory remembers.", GREEN, TEAL),
           PageBreak()]
 
 # ---------- 6 problems to solve ----------
@@ -473,6 +510,7 @@ story += [P("11. Hardware and costs", H1),
                  ["V-JEPA 2.1 ViT-L (optional)", "about 1-2 GB", "Only for identity features"],
                  ["Qwen3-VL 2B/4B", "about 5-10 GB", "Separate worker, fits alongside detection"],
                  ["Qwen3-VL 8B full precision", "about 16 GB just for weights", "Does not fit with the rest; use a 4/8-bit version"],
+                 ["SAM 2.1 tiny/small", "small model (38.9M params for tiny); memory grows with objects and video length", "Only on demand for hard cases, crops and labelling"],
                  ["SAM 3", "several GB", "Only on demand or offline for labelling"]],
                 [55, 45, 70]),
           Spacer(1, 6),
@@ -508,6 +546,8 @@ src = [("Ultralytics YOLO26 docs", "https://docs.ultralytics.com/"),
        ("BrackishMOT (arXiv 2302.10645)", "https://arxiv.org/pdf/2302.10645"),
        ("Melops dataset (Scientific Data 2026)", "https://iris.univr.it/retrieve/fe930e5b-2ab4-4e29-a004-01f0efc87f87/s41597-026-07045-1.pdf"),
        ("SAM 3 official repository", "https://github.com/facebookresearch/sam3"),
+       ("SAM 2 / SAM 2.1 official repository", "https://github.com/facebookresearch/sam2"),
+       ("SAM2Long (ICCV 2025)", "https://openaccess.thecvf.com/content/ICCV2025/html/Ding_SAM2Long_Enhancing_SAM_2_for_Long_Video_Segmentation_with_a_ICCV_2025_paper.html"),
        ("SAM 3 in Transformers", "https://huggingface.co/docs/transformers/model_doc/sam3_video"),
        ("V-JEPA 2 / 2.1 repository", "https://github.com/facebookresearch/vjepa2"),
        ("V-JEPA 2.1 paper (arXiv 2603.14482)", "https://arxiv.org/abs/2603.14482"),
@@ -527,7 +567,7 @@ for i, (t, u) in enumerate(src, 1):
     story.append(P(f"{i}. {t} - {link(u)}", SM))
     story.append(Spacer(1, 2))
 story += [Spacer(1, 6),
-          P("Not re-checked for this document: BoT-SORT, ByteTrack, DeepSORT, SAM2 / SAM2Long, RT-DETR, TrackEval, FathomNet, "
+          P("Not re-checked for this document: BoT-SORT, ByteTrack, DeepSORT, RT-DETR, TrackEval, FathomNet, "
             "WaterNet / UWCNN, FFmpeg, FAISS, FastAPI, Streamlit.", NOTE)]
 
 doc = SimpleDocTemplate(str(OUT), pagesize=A4, leftMargin=20 * mm, rightMargin=20 * mm,
