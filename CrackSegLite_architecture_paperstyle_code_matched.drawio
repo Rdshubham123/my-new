@@ -262,16 +262,14 @@
         <mxCell id="c65" edge="1" parent="1" source="c58" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic;strokeColor=#000000;strokeWidth=2.0;fontSize=16;fontStyle=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="c59" value="">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="c66" edge="1" parent="1" source="c55" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic;strokeColor=#000000;strokeWidth=2.0;fontSize=16;fontStyle=1;exitX=0.5;exitY=0;entryX=0.5;entryY=0;" target="c59" value="">
+        <mxCell id="c66" edge="1" parent="1" source="c54" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic;strokeColor=#000000;strokeWidth=2.0;fontSize=16;fontStyle=1;exitX=0;exitY=0.5;entryX=0.5;entryY=0;" target="c59" value="">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="585.2" y="680.4" />
-              <mxPoint x="1198.4" y="680.4" />
-            </Array>
+              <mxPoint x="343" y="757" /><mxPoint x="343" y="680.4" /><mxPoint x="1198.4" y="680.4" /></Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="c67" parent="1" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontSize=14;" value="&lt;font style=&quot;font-size: 20px;&quot;&gt;identity&lt;/font&gt;" vertex="1">
-          <mxGeometry height="30.8" width="50" x="570" y="650" as="geometry" />
+        <mxCell id="c67" parent="1" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontSize=14;" value="&lt;font style=&quot;font-size: 20px;&quot;&gt;identity (block input x)&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30.8" width="330" x="407.6" y="650" as="geometry" />
         </mxCell>
         <mxCell id="c68" edge="1" parent="1" source="c7" style="rounded=0;html=1;endArrow=classic;strokeColor=#000000;strokeWidth=2.0;fontSize=16;fontStyle=1;dashed=1;exitX=0.1;exitY=1;entryX=0.05;entryY=0;" target="c53" value="">
           <mxGeometry relative="1" as="geometry" />
