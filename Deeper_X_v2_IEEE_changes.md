@@ -29,3 +29,9 @@ No numbers, results or claims were changed.
 7. Table XIV methods (DGC-UWnet, LSNet, USUIR, FUSION, snnTrans-DHZ) and Table I datasets (SUIM-E, SQUID, U45) have no citations.
 8. Fill in: authors and IEEE membership grades, affiliations, manuscript dates, funding, manuscript ID in the page header, and author biographies (omitted).
 9. Equations are standard Word equations; the preview I used cannot draw them, so open the file in Word and check Eqs. (1)–(17).
+
+## Update: references and Table XIV
+- References increased from 25 to 40. New entries: U-Net, AdamW, SGDR, layer normalization, GELU, mixed-precision training, PyTorch, haze-lines/SQUID (Berman et al.), ResNet, capsule routing, VGG, batch normalization, group normalization, CycleGAN, checkerboard artifacts. Each is cited where the text or a table uses that method.
+- All references are renumbered in order of first citation (IEEE style); ranges such as [5]–[7] are kept. Table I now cites SQUID and SUIM-E.
+- Table XIV: † marks values where Deeper X v2 is better than that published model (fewer parameters or GFLOPs; higher PSNR or SSIM). PSNR/SSIM marks are given only against our result on the same dataset family (EUVP, UIEB, LSUI-400), and the footnote says the test subsets differ. Rows stay ordered by parameter count. Where a model beats us (e.g. PSNR of Shallow-UWnet, FUSION, DGC-UWnet) there is no mark.
+- Please verify the 15 new reference entries (volume, pages, year) against the original sources before submission. I could not look them up online here. The Table XIV models (DGC-UWnet, LSNet, USUIR, FUSION, snnTrans-DHZ) and the SUIM-E, U45 and RUIE sources still need your own citations.
